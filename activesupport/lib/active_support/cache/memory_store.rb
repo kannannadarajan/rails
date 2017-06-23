@@ -1,10 +1,10 @@
-require 'monitor'
+require "monitor"
 
 module ActiveSupport
   module Cache
     # A cache store implementation which stores everything into memory in the
     # same process. If you're running multiple Ruby on Rails server processes
-    # (which is the case if you're using mongrel_cluster or Phusion Passenger),
+    # (which is the case if you're using Phusion Passenger or puma clustered mode),
     # then this means that Rails server process instances won't be able
     # to share cache data with each other and this may not be the most
     # appropriate cache in that scenario.
@@ -28,6 +28,7 @@ module ActiveSupport
         @pruning = false
       end
 
+      # Delete all data stored in a given cache store.
       def clear(options = nil)
         synchronize do
           @data.clear
@@ -36,10 +37,11 @@ module ActiveSupport
         end
       end
 
+      # Preemptively iterates through all stored keys and removes the ones which have expired.
       def cleanup(options = nil)
         options = merged_options(options)
-        instrument(:cleanup, :size => @data.size) do
-          keys = synchronize{ @data.keys }
+        instrument(:cleanup, size: @data.size) do
+          keys = synchronize { @data.keys }
           keys.each do |key|
             entry = @data[key]
             delete_entry(key, options) if entry && entry.expired?
@@ -55,8 +57,8 @@ module ActiveSupport
         begin
           start_time = Time.now
           cleanup
-          instrument(:prune, target_size, :from => @cache_size) do
-            keys = synchronize{ @key_access.keys.sort{|a,b| @key_access[a].to_f <=> @key_access[b].to_f} }
+          instrument(:prune, target_size, from: @cache_size) do
+            keys = synchronize { @key_access.keys.sort { |a, b| @key_access[a].to_f <=> @key_access[b].to_f } }
             keys.each do |key|
               delete_entry(key, options)
               return if @cache_size <= target_size || (max_time && Time.now - start_time > max_time)
@@ -74,32 +76,15 @@ module ActiveSupport
 
       # Increment an integer value in the cache.
       def increment(name, amount = 1, options = nil)
-        synchronize do
-          options = merged_options(options)
-          if num = read(name, options)
-            num = num.to_i + amount
-            write(name, num, options)
-            num
-          else
-            nil
-          end
-        end
+        modify_value(name, amount, options)
       end
 
       # Decrement an integer value in the cache.
       def decrement(name, amount = 1, options = nil)
-        synchronize do
-          options = merged_options(options)
-          if num = read(name, options)
-            num = num.to_i - amount
-            write(name, num, options)
-            num
-          else
-            nil
-          end
-        end
+        modify_value(name, -amount, options)
       end
 
+      # Deletes cache entries if the cache key matches a given pattern.
       def delete_matched(matcher, options = nil)
         options = merged_options(options)
         instrument(:delete_matched, matcher.inspect) do
@@ -121,8 +106,15 @@ module ActiveSupport
         @monitor.synchronize(&block)
       end
 
-      protected
-        def read_entry(key, options) # :nodoc:
+      private
+
+        PER_ENTRY_OVERHEAD = 240
+
+        def cached_size(key, entry)
+          key.to_s.bytesize + entry.size + PER_ENTRY_OVERHEAD
+        end
+
+        def read_entry(key, options)
           entry = @data[key]
           synchronize do
             if entry
@@ -134,11 +126,16 @@ module ActiveSupport
           entry
         end
 
-        def write_entry(key, entry, options) # :nodoc:
+        def write_entry(key, entry, options)
+          entry.dup_value!
           synchronize do
             old_entry = @data[key]
-            @cache_size -= old_entry.size if old_entry
-            @cache_size += entry.size
+            return false if @data.key?(key) && options[:unless_exist]
+            if old_entry
+              @cache_size -= (old_entry.size - entry.size)
+            else
+              @cache_size += cached_size(key, entry)
+            end
             @key_access[key] = Time.now.to_f
             @data[key] = entry
             prune(@max_size * 0.75, @max_prune_time) if @cache_size > @max_size
@@ -146,12 +143,23 @@ module ActiveSupport
           end
         end
 
-        def delete_entry(key, options) # :nodoc:
+        def delete_entry(key, options)
           synchronize do
             @key_access.delete(key)
             entry = @data.delete(key)
-            @cache_size -= entry.size if entry
+            @cache_size -= cached_size(key, entry) if entry
             !!entry
+          end
+        end
+
+        def modify_value(name, amount, options)
+          synchronize do
+            options = merged_options(options)
+            if num = read(name, options)
+              num = num.to_i + amount
+              write(name, num, options)
+              num
+            end
           end
         end
     end

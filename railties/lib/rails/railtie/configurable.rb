@@ -1,4 +1,4 @@
-require 'active_support/concern'
+require "active_support/concern"
 
 module Rails
   class Railtie
@@ -6,10 +6,10 @@ module Rails
       extend ActiveSupport::Concern
 
       module ClassMethods
-        delegate :config, :to => :instance
+        delegate :config, to: :instance
 
         def inherited(base)
-          raise "You cannot inherit from a #{self.superclass.name} child"
+          raise "You cannot inherit from a #{superclass.name} child"
         end
 
         def instance
@@ -24,11 +24,11 @@ module Rails
           class_eval(&block)
         end
 
-        protected
+        private
 
-        def method_missing(*args, &block)
-          instance.send(*args, &block)
-        end
+          def method_missing(*args, &block)
+            instance.send(*args, &block)
+          end
       end
     end
   end

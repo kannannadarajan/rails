@@ -1,74 +1,84 @@
+require "active_support/core_ext/object/duplicable"
+
 module ActionDispatch
   module Http
     class ParameterFilter
+      FILTERED = "[FILTERED]".freeze # :nodoc:
 
-      def initialize(filters)
+      def initialize(filters = [])
         @filters = filters
       end
 
       def filter(params)
-        if enabled?
-          compiled_filter.call(params)
-        else
-          params.dup
-        end
+        compiled_filter.call(params)
       end
 
     private
 
-      def enabled?
-        @filters.present?
-      end
-
-      FILTERED = '[FILTERED]'.freeze
-
       def compiled_filter
-        @compiled_filter ||= begin
-          regexps, blocks = compile_filter
+        @compiled_filter ||= CompiledFilter.compile(@filters)
+      end
 
-          lambda do |original_params|
-            filtered_params = {}
+      class CompiledFilter # :nodoc:
+        def self.compile(filters)
+          return lambda { |params| params.dup } if filters.empty?
 
-            original_params.each do |key, value|
-              if regexps.find { |r| key =~ r }
-                value = FILTERED
-              elsif value.is_a?(Hash)
-                value = filter(value)
-              elsif value.is_a?(Array)
-                value = value.map { |v| v.is_a?(Hash) ? filter(v) : v }
-              elsif blocks.present?
-                key = key.dup
-                value = value.dup if value.duplicable?
-                blocks.each { |b| b.call(key, value) }
-              end
+          strings, regexps, blocks = [], [], []
 
-              filtered_params[key] = value
+          filters.each do |item|
+            case item
+            when Proc
+              blocks << item
+            when Regexp
+              regexps << item
+            else
+              strings << Regexp.escape(item.to_s)
             end
-
-            filtered_params
           end
-        end
-      end
 
-      def compile_filter
-        strings, regexps, blocks = [], [], []
+          deep_regexps, regexps = regexps.partition { |r| r.to_s.include?("\\.".freeze) }
+          deep_strings, strings = strings.partition { |s| s.include?("\\.".freeze) }
 
-        @filters.each do |item|
-          case item
-          when NilClass
-          when Proc
-            blocks << item
-          when Regexp
-            regexps << item
-          else
-            strings << item.to_s
-          end
+          regexps << Regexp.new(strings.join("|".freeze), true) unless strings.empty?
+          deep_regexps << Regexp.new(deep_strings.join("|".freeze), true) unless deep_strings.empty?
+
+          new regexps, deep_regexps, blocks
         end
 
-        regexps << Regexp.new(strings.join('|'), true) unless strings.empty?
-        [regexps, blocks]
-      end
+        attr_reader :regexps, :deep_regexps, :blocks
 
+        def initialize(regexps, deep_regexps, blocks)
+          @regexps = regexps
+          @deep_regexps = deep_regexps.any? ? deep_regexps : nil
+          @blocks = blocks
+        end
+
+        def call(original_params, parents = [])
+          filtered_params = original_params.class.new
+
+          original_params.each do |key, value|
+            parents.push(key) if deep_regexps
+            if regexps.any? { |r| key =~ r }
+              value = FILTERED
+            elsif deep_regexps && (joined = parents.join(".")) && deep_regexps.any? { |r| joined =~ r }
+              value = FILTERED
+            elsif value.is_a?(Hash)
+              value = call(value, parents)
+            elsif value.is_a?(Array)
+              value = value.map { |v| v.is_a?(Hash) ? call(v, parents) : v }
+            elsif blocks.any?
+              key = key.dup if key.duplicable?
+              value = value.dup if value.duplicable?
+              blocks.each { |b| b.call(key, value) }
+            end
+            parents.pop if deep_regexps
+
+            filtered_params[key] = value
+          end
+
+          filtered_params
+        end
+      end
     end
   end
 end

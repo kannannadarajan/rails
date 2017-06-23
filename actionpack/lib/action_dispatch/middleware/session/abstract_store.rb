@@ -1,44 +1,41 @@
-require 'rack/utils'
-require 'rack/request'
-require 'rack/session/abstract/id'
-require 'action_dispatch/middleware/cookies'
-require 'active_support/core_ext/object/blank'
+require "rack/utils"
+require "rack/request"
+require "rack/session/abstract/id"
+require "action_dispatch/middleware/cookies"
+require "action_dispatch/request/session"
 
 module ActionDispatch
   module Session
     class SessionRestoreError < StandardError #:nodoc:
-    end
-
-    module DestroyableSession
-      def destroy
-        clear
-        options = @env[Rack::Session::Abstract::ENV_SESSION_OPTIONS_KEY] if @env
-        options ||= {}
-        @by.send(:destroy_session, @env, options[:id], options) if @by
-        options[:id] = nil
-        @loaded = false
+      def initialize
+        super("Session contains objects whose class definition isn't available.\n" \
+          "Remember to require the classes for all objects kept in the session.\n" \
+          "(Original exception: #{$!.message} [#{$!.class}])\n")
+        set_backtrace $!.backtrace
       end
     end
 
-    ::Rack::Session::Abstract::SessionHash.send :include, DestroyableSession
-
     module Compatibility
       def initialize(app, options = {})
-        options[:key] ||= '_session_id'
+        options[:key] ||= "_session_id"
         super
       end
 
       def generate_sid
         sid = SecureRandom.hex(16)
-        sid.encode!('UTF-8')
+        sid.encode!(Encoding::UTF_8)
         sid
       end
 
-    protected
+    private
 
-      def initialize_sid
+      def initialize_sid # :doc:
         @default_options.delete(:sidbits)
         @default_options.delete(:secure_random)
+      end
+
+      def make_request(env)
+        ActionDispatch::Request.new env
       end
     end
 
@@ -58,11 +55,8 @@ module ActionDispatch
           begin
             # Note that the regexp does not allow $1 to end with a ':'
             $1.constantize
-          rescue LoadError, NameError => const_error
-            raise ActionDispatch::Session::SessionRestoreError,
-              "Session contains objects whose class definition isn't available.\n" +
-              "Remember to require the classes for all objects kept in the session.\n" +
-              "(Original exception: #{const_error.message} [#{const_error.class}])\n"
+          rescue LoadError, NameError
+            raise ActionDispatch::Session::SessionRestoreError
           end
           retry
         else
@@ -71,9 +65,26 @@ module ActionDispatch
       end
     end
 
-    class AbstractStore < Rack::Session::Abstract::ID
+    module SessionObject # :nodoc:
+      def prepare_session(req)
+        Request::Session.create(self, req, @default_options)
+      end
+
+      def loaded_session?(session)
+        !session.is_a?(Request::Session) || session.loaded?
+      end
+    end
+
+    class AbstractStore < Rack::Session::Abstract::Persisted
       include Compatibility
       include StaleSessionCheck
+      include SessionObject
+
+      private
+
+        def set_cookie(request, session_id, cookie)
+          request.cookie_jar[key] = cookie
+        end
     end
   end
 end

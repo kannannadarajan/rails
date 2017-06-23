@@ -1,90 +1,103 @@
-require 'cases/helper'
-require 'models/topic'
+require "cases/helper"
+require "models/topic"
+require "models/author"
+require "models/post"
 
-module ActiveRecord
-  class BindParameterTest < ActiveRecord::TestCase
-    fixtures :topics
+if ActiveRecord::Base.connection.supports_statement_cache? &&
+   ActiveRecord::Base.connection.prepared_statements
+  module ActiveRecord
+    class BindParameterTest < ActiveRecord::TestCase
+      fixtures :topics, :authors, :author_addresses, :posts
 
-    class LogListener
-      attr_accessor :calls
+      class LogListener
+        attr_accessor :calls
 
-      def initialize
-        @calls = []
+        def initialize
+          @calls = []
+        end
+
+        def call(*args)
+          calls << args
+        end
       end
 
-      def call(*args)
-        calls << args
+      def setup
+        super
+        @connection = ActiveRecord::Base.connection
+        @subscriber = LogListener.new
+        @pk = Topic.columns_hash[Topic.primary_key]
+        @subscription = ActiveSupport::Notifications.subscribe("sql.active_record", @subscriber)
       end
-    end
 
-    def setup
-      super
-      @connection = ActiveRecord::Base.connection
-      @listener   = LogListener.new
-      @pk         = Topic.columns.find { |c| c.primary }
-      ActiveSupport::Notifications.subscribe('sql.active_record', @listener)
-    end
+      def teardown
+        ActiveSupport::Notifications.unsubscribe(@subscription)
+      end
 
-    def teardown
-      ActiveSupport::Notifications.unsubscribe(@listener)
-    end
+      def test_bind_from_join_in_subquery
+        subquery = Author.joins(:thinking_posts).where(name: "David")
+        scope = Author.from(subquery, "authors").where(id: 1)
+        assert_equal 1, scope.count
+      end
 
-    def test_binds_are_logged
-      # FIXME: use skip with minitest
-      return unless @connection.supports_statement_cache?
+      def test_binds_are_logged
+        sub   = Arel::Nodes::BindParam.new
+        binds = [Relation::QueryAttribute.new("id", 1, Type::Value.new)]
+        sql   = "select * from topics where id = #{sub.to_sql}"
 
-      sub   = @connection.substitute_at(@pk, 0)
-      binds = [[@pk, 1]]
-      sql   = "select * from topics where id = #{sub}"
+        @connection.exec_query(sql, "SQL", binds)
 
-      @connection.exec_query(sql, 'SQL', binds)
+        message = @subscriber.calls.find { |args| args[4][:sql] == sql }
+        assert_equal binds, message[4][:binds]
+      end
 
-      message = @listener.calls.find { |args| args[4][:sql] == sql }
-      assert_equal binds, message[4][:binds]
-    end
+      def test_find_one_uses_binds
+        Topic.find(1)
+        message = @subscriber.calls.find { |args| args[4][:binds].any? { |attr| attr.value == 1 } }
+        assert message, "expected a message with binds"
+      end
 
-    def test_find_one_uses_binds
-      # FIXME: use skip with minitest
-      return unless @connection.supports_statement_cache?
+      def test_logs_binds_after_type_cast
+        binds = [Relation::QueryAttribute.new("id", "10", Type::Integer.new)]
+        assert_logs_binds(binds)
+      end
 
-      Topic.find(1)
-      binds = [[@pk, 1]]
-      message = @listener.calls.find { |args| args[4][:binds] == binds }
-      assert message, 'expected a message with binds'
-    end
+      def test_logs_legacy_binds_after_type_cast
+        binds = [[@pk, "10"]]
+        assert_logs_binds(binds)
+      end
 
-    def test_logs_bind_vars
-      # FIXME: use skip with minitest
-      return unless @connection.supports_statement_cache?
+      private
+        def assert_logs_binds(binds)
+          payload = {
+            name: "SQL",
+            sql: "select * from topics where id = ?",
+            binds: binds,
+            type_casted_binds: @connection.type_casted_binds(binds)
+          }
 
-      pk = Topic.columns.find { |x| x.primary }
+          event = ActiveSupport::Notifications::Event.new(
+            "foo",
+            Time.now,
+            Time.now,
+            123,
+            payload)
 
-      payload = {
-        :name  => 'SQL',
-        :sql   => 'select * from topics where id = ?',
-        :binds => [[pk, 10]]
-      }
-      event  = ActiveSupport::Notifications::Event.new(
-        'foo',
-        Time.now,
-        Time.now,
-        123,
-        payload)
+          logger = Class.new(ActiveRecord::LogSubscriber) {
+            attr_reader :debugs
 
-        logger = Class.new(ActiveRecord::LogSubscriber) {
-          attr_reader :debugs
-          def initialize
-            super
-            @debugs = []
-          end
+            def initialize
+              super
+              @debugs = []
+            end
 
-          def debug str
-            @debugs << str
-          end
-        }.new
+            def debug(str)
+              @debugs << str
+            end
+          }.new
 
-        logger.sql event
-        assert_match([[pk.name, 10]].inspect, logger.debugs.first)
+          logger.sql(event)
+          assert_match([[@pk.name, 10]].inspect, logger.debugs.first)
+        end
     end
   end
 end

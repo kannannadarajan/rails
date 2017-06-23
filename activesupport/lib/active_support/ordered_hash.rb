@@ -1,27 +1,39 @@
-require 'yaml'
+require "yaml"
 
 YAML.add_builtin_type("omap") do |type, val|
-  ActiveSupport::OrderedHash[val.map{ |v| v.to_a.first }]
+  ActiveSupport::OrderedHash[val.map { |v| v.to_a.first }]
 end
 
 module ActiveSupport
-  # The order of iteration over hashes in Ruby 1.8 is undefined. For example, you do not know the
-  # order in which +keys+ will return keys, or +each+ yield pairs. <tt>ActiveSupport::OrderedHash</tt>
-  # implements a hash that preserves insertion order, as in Ruby 1.9:
+  # DEPRECATED: <tt>ActiveSupport::OrderedHash</tt> implements a hash that preserves
+  # insertion order.
   #
   #   oh = ActiveSupport::OrderedHash.new
   #   oh[:a] = 1
   #   oh[:b] = 2
   #   oh.keys # => [:a, :b], this order is guaranteed
   #
-  # <tt>ActiveSupport::OrderedHash</tt> is namespaced to prevent conflicts with other implementations.
+  # Also, maps the +omap+ feature for YAML files
+  # (See http://yaml.org/type/omap.html) to support ordered items
+  # when loading from yaml.
+  #
+  # <tt>ActiveSupport::OrderedHash</tt> is namespaced to prevent conflicts
+  # with other implementations.
   class OrderedHash < ::Hash
     def to_yaml_type
       "!tag:yaml.org,2002:omap"
     end
 
     def encode_with(coder)
-      coder.represent_seq '!omap', map { |k,v| { k => v } }
+      coder.represent_seq "!omap", map { |k, v| { k => v } }
+    end
+
+    def select(*args, &block)
+      dup.tap { |hash| hash.select!(*args, &block) }
+    end
+
+    def reject(*args, &block)
+      dup.tap { |hash| hash.reject!(*args, &block) }
     end
 
     def nested_under_indifferent_access

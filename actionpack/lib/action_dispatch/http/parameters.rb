@@ -1,77 +1,127 @@
-require 'active_support/core_ext/hash/keys'
-require 'active_support/core_ext/hash/indifferent_access'
-
 module ActionDispatch
   module Http
     module Parameters
+      extend ActiveSupport::Concern
+
+      PARAMETERS_KEY = "action_dispatch.request.path_parameters"
+
+      DEFAULT_PARSERS = {
+        Mime[:json].symbol => -> (raw_post) {
+          data = ActiveSupport::JSON.decode(raw_post)
+          data.is_a?(Hash) ? data : { _json: data }
+        }
+      }
+
+      # Raised when raw data from the request cannot be parsed by the parser
+      # defined for request's content mime type.
+      class ParseError < StandardError
+        def initialize
+          super($!.message)
+        end
+      end
+
+      included do
+        class << self
+          # Returns the parameter parsers.
+          attr_reader :parameter_parsers
+        end
+
+        self.parameter_parsers = DEFAULT_PARSERS
+      end
+
+      module ClassMethods
+        # Configure the parameter parser for a given mime type.
+        #
+        # It accepts a hash where the key is the symbol of the mime type
+        # and the value is a proc.
+        #
+        #     original_parsers = ActionDispatch::Request.parameter_parsers
+        #     xml_parser = -> (raw_post) { Hash.from_xml(raw_post) || {} }
+        #     new_parsers = original_parsers.merge(xml: xml_parser)
+        #     ActionDispatch::Request.parameter_parsers = new_parsers
+        def parameter_parsers=(parsers)
+          @parameter_parsers = parsers.transform_keys { |key| key.respond_to?(:symbol) ? key.symbol : key }
+        end
+      end
+
       # Returns both GET and POST \parameters in a single hash.
       def parameters
-        @env["action_dispatch.request.parameters"] ||= begin
-          params = request_parameters.merge(query_parameters)
-          params.merge!(path_parameters)
-          encode_params(params).with_indifferent_access
-        end
+        params = get_header("action_dispatch.request.parameters")
+        return params if params
+
+        params = begin
+                   request_parameters.merge(query_parameters)
+                 rescue EOFError
+                   query_parameters.dup
+                 end
+        params.merge!(path_parameters)
+        params = set_binary_encoding(params)
+        set_header("action_dispatch.request.parameters", params)
+        params
       end
       alias :params :parameters
 
       def path_parameters=(parameters) #:nodoc:
-        @symbolized_path_params = nil
-        @env.delete("action_dispatch.request.parameters")
-        @env["action_dispatch.request.path_parameters"] = parameters
-      end
+        delete_header("action_dispatch.request.parameters")
 
-      # The same as <tt>path_parameters</tt> with explicitly symbolized keys.
-      def symbolized_path_parameters
-        @symbolized_path_params ||= path_parameters.symbolize_keys
+        # If any of the path parameters has an invalid encoding then
+        # raise since it's likely to trigger errors further on.
+        Request::Utils.check_param_encoding(parameters)
+
+        set_header PARAMETERS_KEY, parameters
+      rescue Rack::Utils::ParameterTypeError, Rack::Utils::InvalidParameterError => e
+        raise ActionController::BadRequest.new("Invalid path parameters: #{e.message}")
       end
 
       # Returns a hash with the \parameters used to form the \path of the request.
       # Returned hash keys are strings:
       #
       #   {'action' => 'my_action', 'controller' => 'my_controller'}
-      #
-      # See <tt>symbolized_path_parameters</tt> for symbolized keys.
       def path_parameters
-        @env["action_dispatch.request.path_parameters"] ||= {}
+        get_header(PARAMETERS_KEY) || set_header(PARAMETERS_KEY, {})
       end
 
-    private
+      private
 
-      # TODO: Validate that the characters are UTF-8. If they aren't,
-      # you'll get a weird error down the road, but our form handling
-      # should really prevent that from happening
-      def encode_params(params)
-        if params.is_a?(String)
-          return params.force_encoding("UTF-8").encode!
-        elsif !params.is_a?(Hash)
-          return params
+        def set_binary_encoding(params)
+          action = params[:action]
+          if binary_params_for?(action)
+            ActionDispatch::Request::Utils.each_param_value(params) do |param|
+              param.force_encoding ::Encoding::ASCII_8BIT
+            end
+          end
+          params
         end
 
-        params.each do |k, v|
-          case v
-          when Hash
-            encode_params(v)
-          when Array
-            v.map! {|el| encode_params(el) }
-          else
-            encode_params(v)
+        def binary_params_for?(action)
+          controller_class.binary_params_for?(action)
+        rescue NameError
+          false
+        end
+
+        def parse_formatted_parameters(parsers)
+          return yield if content_length.zero? || content_mime_type.nil?
+
+          strategy = parsers.fetch(content_mime_type.symbol) { return yield }
+
+          begin
+            strategy.call(raw_post)
+          rescue # JSON or Ruby code block errors
+            my_logger = logger || ActiveSupport::Logger.new($stderr)
+            my_logger.debug "Error occurred while parsing request parameters.\nContents:\n\n#{raw_post}"
+
+            raise ParseError
           end
         end
-      end
 
-      # Convert nested Hash to HashWithIndifferentAccess
-      def normalize_parameters(value)
-        case value
-        when Hash
-          h = {}
-          value.each { |k, v| h[k] = normalize_parameters(v) }
-          h.with_indifferent_access
-        when Array
-          value.map { |e| normalize_parameters(e) }
-        else
-          value
+        def params_parsers
+          ActionDispatch::Request.parameter_parsers
         end
-      end
     end
+  end
+
+  module ParamsParser
+    include ActiveSupport::Deprecation::DeprecatedConstantAccessor
+    deprecate_constant "ParseError", "ActionDispatch::Http::Parameters::ParseError"
   end
 end

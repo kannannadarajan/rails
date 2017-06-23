@@ -1,10 +1,10 @@
-require 'abstract_unit'
+require "abstract_unit"
 
 module RenderStreaming
   class BasicController < ActionController::Base
     self.view_paths = [ActionView::FixtureResolver.new(
       "render_streaming/basic/hello_world.html.erb" => "Hello world",
-      "render_streaming/basic/boom.html.erb" => "<%= nil.invalid! %>",
+      "render_streaming/basic/boom.html.erb" => "<%= raise 'Ruby was here!' %>",
       "layouts/application.html.erb" => "<%= yield %>, I'm here!",
       "layouts/boom.html.erb" => "<body class=\"<%= nil.invalid! %>\"<%= yield %></body>"
     )]
@@ -12,32 +12,32 @@ module RenderStreaming
     layout "application"
 
     def hello_world
-      render :stream => true
+      render stream: true
     end
 
     def layout_exception
-      render :action => "hello_world", :stream => true, :layout => "boom"
+      render action: "hello_world", stream: true, layout: "boom"
     end
 
     def template_exception
-      render :action => "boom", :stream => true
+      render action: "boom", stream: true
     end
 
     def skip
-      render :action => "hello_world", :stream => false
+      render action: "hello_world", stream: false
     end
 
     def explicit
-      render :action => "hello_world", :stream => true
+      render action: "hello_world", stream: true
     end
 
     def no_layout
-      render :action => "hello_world", :stream => true, :layout => false
+      render action: "hello_world", stream: true, layout: false
     end
 
     def explicit_cache
       headers["Cache-Control"] = "private"
-      render :action => "hello_world", :stream => true
+      render action: "hello_world", stream: true
     end
   end
 
@@ -73,40 +73,40 @@ module RenderStreaming
 
     test "rendering with layout exception" do
       get "/render_streaming/basic/layout_exception"
-      assert_body "d\r\n<body class=\"\r\n4e\r\n\"><script type=\"text/javascript\">window.location = \"/500.html\"</script></html>\r\n0\r\n\r\n"
+      assert_body "d\r\n<body class=\"\r\n37\r\n\"><script>window.location = \"/500.html\"</script></html>\r\n0\r\n\r\n"
       assert_streaming!
     end
 
     test "rendering with template exception" do
       get "/render_streaming/basic/template_exception"
-      assert_body "4e\r\n\"><script type=\"text/javascript\">window.location = \"/500.html\"</script></html>\r\n0\r\n\r\n"
+      assert_body "37\r\n\"><script>window.location = \"/500.html\"</script></html>\r\n0\r\n\r\n"
       assert_streaming!
     end
 
     test "rendering with template exception logs the exception" do
       io = StringIO.new
-      _old, ActionController::Base.logger = ActionController::Base.logger, ActiveSupport::Logger.new(io)
+      _old, ActionView::Base.logger = ActionView::Base.logger, ActiveSupport::Logger.new(io)
 
       begin
         get "/render_streaming/basic/template_exception"
         io.rewind
-        assert_match "(undefined method `invalid!' for nil:NilClass)", io.read
+        assert_match "Ruby was here!", io.read
       ensure
-        ActionController::Base.logger = _old
+        ActionView::Base.logger = _old
       end
     end
 
     test "do not stream on HTTP/1.0" do
-      get "/render_streaming/basic/hello_world", nil, "HTTP_VERSION" => "HTTP/1.0"
+      get "/render_streaming/basic/hello_world", headers: { "HTTP_VERSION" => "HTTP/1.0" }
       assert_body "Hello world, I'm here!"
       assert_status 200
       assert_equal "22", headers["Content-Length"]
-      assert_equal nil, headers["Transfer-Encoding"]
+      assert_nil headers["Transfer-Encoding"]
     end
 
-    def assert_streaming!(cache="no-cache")
+    def assert_streaming!(cache = "no-cache")
       assert_status 200
-      assert_equal nil, headers["Content-Length"]
+      assert_nil headers["Content-Length"]
       assert_equal "chunked", headers["Transfer-Encoding"]
       assert_equal cache, headers["Cache-Control"]
     end

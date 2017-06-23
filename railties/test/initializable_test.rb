@@ -1,8 +1,7 @@
-require 'abstract_unit'
-require 'rails/initializable'
+require "abstract_unit"
+require "rails/initializable"
 
 module InitializableTests
-
   class Foo
     include Rails::Initializable
     attr_accessor :foo, :bar
@@ -17,14 +16,6 @@ module InitializableTests
     initializer :bar do
       @bar ||= 0
       @bar += 1
-    end
-  end
-
-  module Word
-    include Rails::Initializable
-
-    initializer :word do
-      $word = "bird"
     end
   end
 
@@ -43,17 +34,17 @@ module InitializableTests
   class Child < Parent
     include Rails::Initializable
 
-    initializer :three, :before => :one do
+    initializer :three, before: :one do
       $arr << 3
     end
 
-    initializer :four, :after => :one, :before => :two do
+    initializer :four, after: :one, before: :two do
       $arr << 4
     end
   end
 
   class Parent
-    initializer :five, :before => :one do
+    initializer :five, before: :one do
       $arr << 5
     end
   end
@@ -61,7 +52,7 @@ module InitializableTests
   class Instance
     include Rails::Initializable
 
-    initializer :one, :group => :assets do
+    initializer :one, group: :assets do
       $arr << 1
     end
 
@@ -69,7 +60,7 @@ module InitializableTests
       $arr << 2
     end
 
-    initializer :three, :group => :all do
+    initializer :three, group: :all do
       $arr << 3
     end
 
@@ -90,11 +81,11 @@ module InitializableTests
     class MoreInitializers
       include Rails::Initializable
 
-      initializer :startup, :before => :last do
+      initializer :startup, before: :last do
         $arr << 3
       end
 
-      initializer :terminate, :after => :first, :before => :startup do
+      initializer :terminate, after: :first, before: :startup do
         $arr << two
       end
 
@@ -134,11 +125,11 @@ module InitializableTests
     class PluginB
       include Rails::Initializable
 
-      initializer "plugin_b.startup", :after => "plugin_a.startup" do
+      initializer "plugin_b.startup", after: "plugin_a.startup" do
         $arr << 2
       end
 
-      initializer "plugin_b.terminate", :before => "plugin_a.terminate" do
+      initializer "plugin_b.terminate", before: "plugin_a.terminate" do
         $arr << 3
       end
     end
@@ -182,6 +173,11 @@ module InitializableTests
         end
       end
     end
+
+    test "Initializer provides context's class name" do
+      foo = Foo.new
+      assert_equal foo.class, foo.initializers.first.context_class
+    end
   end
 
   class BeforeAfter < ActiveSupport::TestCase
@@ -223,8 +219,8 @@ module InitializableTests
   class WithArgsTest < ActiveSupport::TestCase
     test "running initializers with args" do
       $with_arg = nil
-      WithArgs.new.run_initializers(:default, 'foo')
-      assert_equal 'foo', $with_arg
+      WithArgs.new.run_initializers(:default, "foo")
+      assert_equal "foo", $with_arg
     end
   end
 

@@ -1,4 +1,4 @@
-require 'active_support/concern'
+require "active_support/per_thread_registry"
 
 module ActiveRecord
   module Scoping
@@ -10,143 +10,95 @@ module ActiveRecord
     end
 
     module ClassMethods
-      # with_scope lets you apply options to inner block incrementally. It takes a hash and the keys must be
-      # <tt>:find</tt> or <tt>:create</tt>. <tt>:find</tt> parameter is <tt>Relation</tt> while
-      # <tt>:create</tt> parameters are an attributes hash.
-      #
-      #   class Article < ActiveRecord::Base
-      #     def self.create_with_scope
-      #       with_scope(:find => where(:blog_id => 1), :create => { :blog_id => 1 }) do
-      #         find(1) # => SELECT * from articles WHERE blog_id = 1 AND id = 1
-      #         a = create(1)
-      #         a.blog_id # => 1
-      #       end
-      #     end
-      #   end
-      #
-      # In nested scopings, all previous parameters are overwritten by the innermost rule, with the exception of
-      # <tt>where</tt>, <tt>includes</tt>, and <tt>joins</tt> operations in <tt>Relation</tt>, which are merged.
-      #
-      # <tt>joins</tt> operations are uniqued so multiple scopes can join in the same table without table aliasing
-      # problems. If you need to join multiple tables, but still want one of the tables to be uniqued, use the
-      # array of strings format for your joins.
-      #
-      #   class Article < ActiveRecord::Base
-      #     def self.find_with_scope
-      #       with_scope(:find => where(:blog_id => 1).limit(1), :create => { :blog_id => 1 }) do
-      #         with_scope(:find => limit(10)) do
-      #           all # => SELECT * from articles WHERE blog_id = 1 LIMIT 10
-      #         end
-      #         with_scope(:find => where(:author_id => 3)) do
-      #           all # => SELECT * from articles WHERE blog_id = 1 AND author_id = 3 LIMIT 1
-      #         end
-      #       end
-      #     end
-      #   end
-      #
-      # You can ignore any previous scopings by using the <tt>with_exclusive_scope</tt> method.
-      #
-      #   class Article < ActiveRecord::Base
-      #     def self.find_with_exclusive_scope
-      #       with_scope(:find => where(:blog_id => 1).limit(1)) do
-      #         with_exclusive_scope(:find => limit(10)) do
-      #           all # => SELECT * from articles LIMIT 10
-      #         end
-      #       end
-      #     end
-      #   end
-      #
-      # *Note*: the +:find+ scope also has effect on update and deletion methods, like +update_all+ and +delete_all+.
-      def with_scope(scope = {}, action = :merge, &block)
-        # If another Active Record class has been passed in, get its current scope
-        scope = scope.current_scope if !scope.is_a?(Relation) && scope.respond_to?(:current_scope)
-
-        previous_scope = self.current_scope
-
-        if scope.is_a?(Hash)
-          # Dup first and second level of hash (method and params).
-          scope = scope.dup
-          scope.each do |method, params|
-            scope[method] = params.dup unless params == true
-          end
-
-          scope.assert_valid_keys([ :find, :create ])
-          relation = construct_finder_arel(scope[:find] || {})
-          relation.default_scoped = true unless action == :overwrite
-
-          if previous_scope && previous_scope.create_with_value && scope[:create]
-            scope_for_create = if action == :merge
-              previous_scope.create_with_value.merge(scope[:create])
-            else
-              scope[:create]
-            end
-
-            relation = relation.create_with(scope_for_create)
-          else
-            scope_for_create = scope[:create]
-            scope_for_create ||= previous_scope.create_with_value if previous_scope
-            relation = relation.create_with(scope_for_create) if scope_for_create
-          end
-
-          scope = relation
-        end
-
-        scope = previous_scope.merge(scope) if previous_scope && action == :merge
-
-        self.current_scope = scope
-        begin
-          yield
-        ensure
-          self.current_scope = previous_scope
-        end
-      end
-
-      protected
-
-      # Works like with_scope, but discards any nested properties.
-      def with_exclusive_scope(method_scoping = {}, &block)
-        if method_scoping.values.any? { |e| e.is_a?(ActiveRecord::Relation) }
-          raise ArgumentError, <<-MSG
-  New finder API can not be used with_exclusive_scope. You can either call unscoped to get an anonymous scope not bound to the default_scope:
-
-  User.unscoped.where(:active => true)
-
-  Or call unscoped with a block:
-
-  User.unscoped do
-  User.where(:active => true).all
-  end
-
-  MSG
-        end
-        with_scope(method_scoping, :overwrite, &block)
-      end
-
       def current_scope #:nodoc:
-        Thread.current["#{self}_current_scope"]
+        ScopeRegistry.value_for(:current_scope, self)
       end
 
       def current_scope=(scope) #:nodoc:
-        Thread.current["#{self}_current_scope"] = scope
+        ScopeRegistry.set_value_for(:current_scope, self, scope)
       end
 
-      private
-
-      def construct_finder_arel(options = {}, scope = nil)
-        relation = options.is_a?(Hash) ? unscoped.apply_finder_options(options) : options
-        relation = scope.merge(relation) if scope
-        relation
+      # Collects attributes from scopes that should be applied when creating
+      # an AR instance for the particular class this is called on.
+      def scope_attributes # :nodoc:
+        all.scope_for_create
       end
 
+      # Are there attributes associated with this scope?
+      def scope_attributes? # :nodoc:
+        current_scope
+      end
     end
 
-    def populate_with_current_scope_attributes
+    def populate_with_current_scope_attributes # :nodoc:
       return unless self.class.scope_attributes?
 
-      self.class.scope_attributes.each do |att,value|
+      self.class.scope_attributes.each do |att, value|
         send("#{att}=", value) if respond_to?("#{att}=")
       end
     end
 
+    def initialize_internals_callback # :nodoc:
+      super
+      populate_with_current_scope_attributes
+    end
+
+    # This class stores the +:current_scope+ and +:ignore_default_scope+ values
+    # for different classes. The registry is stored as a thread local, which is
+    # accessed through +ScopeRegistry.current+.
+    #
+    # This class allows you to store and get the scope values on different
+    # classes and different types of scopes. For example, if you are attempting
+    # to get the current_scope for the +Board+ model, then you would use the
+    # following code:
+    #
+    #   registry = ActiveRecord::Scoping::ScopeRegistry
+    #   registry.set_value_for(:current_scope, Board, some_new_scope)
+    #
+    # Now when you run:
+    #
+    #   registry.value_for(:current_scope, Board)
+    #
+    # You will obtain whatever was defined in +some_new_scope+. The #value_for
+    # and #set_value_for methods are delegated to the current ScopeRegistry
+    # object, so the above example code can also be called as:
+    #
+    #   ActiveRecord::Scoping::ScopeRegistry.set_value_for(:current_scope,
+    #       Board, some_new_scope)
+    class ScopeRegistry # :nodoc:
+      extend ActiveSupport::PerThreadRegistry
+
+      VALID_SCOPE_TYPES = [:current_scope, :ignore_default_scope]
+
+      def initialize
+        @registry = Hash.new { |hash, key| hash[key] = {} }
+      end
+
+      # Obtains the value for a given +scope_type+ and +model+.
+      def value_for(scope_type, model)
+        raise_invalid_scope_type!(scope_type)
+        klass = model
+        base = model.base_class
+        while klass <= base
+          value = @registry[scope_type][klass.name]
+          return value if value
+          klass = klass.superclass
+        end
+      end
+
+      # Sets the +value+ for a given +scope_type+ and +model+.
+      def set_value_for(scope_type, model, value)
+        raise_invalid_scope_type!(scope_type)
+        @registry[scope_type][model.name] = value
+      end
+
+      private
+
+        def raise_invalid_scope_type!(scope_type)
+          if !VALID_SCOPE_TYPES.include?(scope_type)
+            raise ArgumentError, "Invalid scope type '#{scope_type}' sent to the registry. Scope types must be included in VALID_SCOPE_TYPES"
+          end
+        end
+    end
   end
 end

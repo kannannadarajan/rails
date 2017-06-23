@@ -6,7 +6,6 @@ module RailtiesTest
 
     def setup
       build_app
-      boot_rails
       FileUtils.rm_rf("#{app_path}/config/environments")
       require "rails/all"
     end
@@ -19,31 +18,24 @@ module RailtiesTest
       @app ||= Rails.application
     end
 
-    test "Rails::Railtie itself does not respond to config" do
-      assert !Rails::Railtie.respond_to?(:config)
+    test "cannot instantiate a Railtie object" do
+      assert_raise(RuntimeError) { Rails::Railtie.new }
     end
 
     test "Railtie provides railtie_name" do
       begin
         class ::FooBarBaz < Rails::Railtie ; end
-        assert_equal "foo_bar_baz", ::FooBarBaz.railtie_name
+        assert_equal "foo_bar_baz", FooBarBaz.railtie_name
       ensure
         Object.send(:remove_const, :"FooBarBaz")
       end
     end
 
-    test "railtie_name can be set manualy" do
+    test "railtie_name can be set manually" do
       class Foo < Rails::Railtie
         railtie_name "bar"
       end
       assert_equal "bar", Foo.railtie_name
-    end
-
-    test "cannot inherit from a railtie" do
-      class Foo < Rails::Railtie ; end
-      assert_raise RuntimeError do
-        class Bar < Foo; end
-      end
     end
 
     test "config is available to railtie" do
@@ -65,7 +57,7 @@ module RailtiesTest
         config.foo.greetings = "hello"
       end
       require "#{app_path}/config/application"
-      assert_equal "hello", AppTemplate::Application.config.foo.greetings
+      assert_equal "hello", Rails.application.config.foo.greetings
     end
 
     test "railtie can add to_prepare callbacks" do
@@ -77,6 +69,21 @@ module RailtiesTest
       extend Rack::Test::Methods
       get "/"
       assert $to_prepare
+    end
+
+    test "railtie have access to application in before_configuration callbacks" do
+      $before_configuration = false
+      class Foo < Rails::Railtie ; config.before_configuration { $before_configuration = Rails.root.to_path } ; end
+      assert_not $before_configuration
+      require "#{app_path}/config/environment"
+      assert_equal app_path, $before_configuration
+    end
+
+    test "before_configuration callbacks run as soon as the application constant inherits from Rails::Application" do
+      $before_configuration = false
+      class Foo < Rails::Railtie ; config.before_configuration { $before_configuration = true } ; end
+      class Application < Rails::Application ; end
+      assert $before_configuration
     end
 
     test "railtie can add after_initialize callbacks" do
@@ -99,11 +106,11 @@ module RailtiesTest
       require "#{app_path}/config/environment"
 
       assert !$ran_block
-      require 'rake'
-      require 'rake/testtask'
-      require 'rdoc/task'
+      require "rake"
+      require "rake/testtask"
+      require "rdoc/task"
 
-      AppTemplate::Application.load_tasks
+      Rails.application.load_tasks
       assert $ran_block
     end
 
@@ -123,12 +130,12 @@ module RailtiesTest
       require "#{app_path}/config/environment"
 
       assert_equal [], $ran_block
-      require 'rake'
-      require 'rake/testtask'
-      require 'rdoc/task'
+      require "rake"
+      require "rake/testtask"
+      require "rdoc/task"
 
-      AppTemplate::Application.load_tasks
-      assert $ran_block.include?("my_tie")
+      Rails.application.load_tasks
+      assert_includes $ran_block, "my_tie"
     end
 
     test "generators block is executed when MyApp.load_generators is called" do
@@ -143,7 +150,7 @@ module RailtiesTest
       require "#{app_path}/config/environment"
 
       assert !$ran_block
-      AppTemplate::Application.load_generators
+      Rails.application.load_generators
       assert $ran_block
     end
 
@@ -159,7 +166,23 @@ module RailtiesTest
       require "#{app_path}/config/environment"
 
       assert !$ran_block
-      AppTemplate::Application.load_console
+      Rails.application.load_console
+      assert $ran_block
+    end
+
+    test "runner block is executed when MyApp.load_runner is called" do
+      $ran_block = false
+
+      class MyTie < Rails::Railtie
+        runner do
+          $ran_block = true
+        end
+      end
+
+      require "#{app_path}/config/environment"
+
+      assert !$ran_block
+      Rails.application.load_runner
       assert $ran_block
     end
 
@@ -180,8 +203,8 @@ module RailtiesTest
     test "we can change our environment if we want to" do
       begin
         original_env = Rails.env
-        Rails.env = 'foo'
-        assert_equal('foo', Rails.env)
+        Rails.env = "foo"
+        assert_equal("foo", Rails.env)
       ensure
         Rails.env = original_env
         assert_equal(original_env, Rails.env)

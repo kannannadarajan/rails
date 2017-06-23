@@ -1,4 +1,4 @@
-require 'abstract_unit'
+require "abstract_unit"
 
 class GrandParent
   include ActiveSupport::Callbacks
@@ -9,8 +9,8 @@ class GrandParent
   end
 
   define_callbacks :dispatch
-  set_callback :dispatch, :before, :before1, :before2, :if => proc {|c| c.action_name == "index" || c.action_name == "update" }
-  set_callback :dispatch, :after, :after1, :after2, :if => proc {|c| c.action_name == "update" || c.action_name == "delete" }
+  set_callback :dispatch, :before, :before1, :before2, if: proc { |c| c.action_name == "index" || c.action_name == "update" }
+  set_callback :dispatch, :after, :after1, :after2, if: proc { |c| c.action_name == "update" || c.action_name == "delete" }
 
   def before1
     @log << "before1"
@@ -29,7 +29,7 @@ class GrandParent
   end
 
   def dispatch
-    run_callbacks(:dispatch, action_name) do
+    run_callbacks :dispatch do
       @log << action_name
     end
     self
@@ -37,12 +37,12 @@ class GrandParent
 end
 
 class Parent < GrandParent
-  skip_callback :dispatch, :before, :before2, :unless => proc {|c| c.action_name == "update" }
-  skip_callback :dispatch, :after, :after2, :unless => proc {|c| c.action_name == "delete" }
+  skip_callback :dispatch, :before, :before2, unless: proc { |c| c.action_name == "update" }
+  skip_callback :dispatch, :after, :after2, unless: proc { |c| c.action_name == "delete" }
 end
 
 class Child < GrandParent
-  skip_callback :dispatch, :before, :before2, :unless => proc {|c| c.action_name == "update" }, :if => :state_open?
+  skip_callback :dispatch, :before, :before2, unless: proc { |c| c.action_name == "update" }, if: :state_open?
 
   def state_open?
     @state == :open
@@ -109,7 +109,6 @@ class BasicCallbacksTest < ActiveSupport::TestCase
     @index    = GrandParent.new("index").dispatch
     @update   = GrandParent.new("update").dispatch
     @delete   = GrandParent.new("delete").dispatch
-    @unknown  = GrandParent.new("unknown").dispatch
   end
 
   def test_basic_conditional_callback1
@@ -130,7 +129,6 @@ class InheritedCallbacksTest < ActiveSupport::TestCase
     @index    = Parent.new("index").dispatch
     @update   = Parent.new("update").dispatch
     @delete   = Parent.new("delete").dispatch
-    @unknown  = Parent.new("unknown").dispatch
   end
 
   def test_inherited_excluded

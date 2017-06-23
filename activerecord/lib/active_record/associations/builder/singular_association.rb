@@ -1,32 +1,40 @@
-module ActiveRecord::Associations::Builder
+# This class is inherited by the has_one and belongs_to association classes
+
+module ActiveRecord::Associations::Builder # :nodoc:
   class SingularAssociation < Association #:nodoc:
-    self.valid_options += [:remote, :dependent, :counter_cache, :primary_key, :inverse_of]
-
-    def constructable?
-      true
+    def self.valid_options(options)
+      super + [:foreign_type, :dependent, :primary_key, :inverse_of, :required]
     end
 
-    def define_accessors
+    def self.define_accessors(model, reflection)
       super
-      define_constructors if constructable?
+      mixin = model.generated_association_methods
+      name = reflection.name
+
+      define_constructors(mixin, name) if reflection.constructable?
+
+      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def reload_#{name}
+          association(:#{name}).force_reload_reader
+        end
+      CODE
     end
 
-    private
-
-      def define_constructors
-        name = self.name
-
-        mixin.redefine_method("build_#{name}") do |*params, &block|
-          association(name).build(*params, &block)
+    # Defines the (build|create)_association methods for belongs_to or has_one association
+    def self.define_constructors(mixin, name)
+      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def build_#{name}(*args, &block)
+          association(:#{name}).build(*args, &block)
         end
 
-        mixin.redefine_method("create_#{name}") do |*params, &block|
-          association(name).create(*params, &block)
+        def create_#{name}(*args, &block)
+          association(:#{name}).create(*args, &block)
         end
 
-        mixin.redefine_method("create_#{name}!") do |*params, &block|
-          association(name).create!(*params, &block)
+        def create_#{name}!(*args, &block)
+          association(:#{name}).create!(*args, &block)
         end
-      end
+      CODE
+    end
   end
 end

@@ -1,26 +1,23 @@
-require 'rails/railtie/configuration'
+require "rails/railtie/configuration"
 
 module Rails
   class Engine
     class Configuration < ::Rails::Railtie::Configuration
       attr_reader :root
-      attr_writer :middleware, :eager_load_paths, :autoload_once_paths, :autoload_paths
+      attr_accessor :middleware
+      attr_writer :eager_load_paths, :autoload_once_paths, :autoload_paths
 
-      def initialize(root=nil)
+      def initialize(root = nil)
         super()
         @root = root
         @generators = app_generators.dup
-      end
-
-      # Returns the middleware stack for the engine.
-      def middleware
-        @middleware ||= Rails::Configuration::MiddlewareStackProxy.new
+        @middleware = Rails::Configuration::MiddlewareStackProxy.new
       end
 
       # Holds generators configuration:
       #
       #   config.generators do |g|
-      #     g.orm             :datamapper, :migration => true
+      #     g.orm             :data_mapper, migration: true
       #     g.template_engine :haml
       #     g.test_framework  :rspec
       #   end
@@ -29,7 +26,7 @@ module Rails
       #
       #   config.generators.colorize_logging = false
       #
-      def generators #:nodoc:
+      def generators
         @generators ||= Rails::Configuration::Generators.new
         yield(@generators) if block_given?
         @generators
@@ -38,26 +35,33 @@ module Rails
       def paths
         @paths ||= begin
           paths = Rails::Paths::Root.new(@root)
-          paths.add "app",                 :eager_load => true, :glob => "*"
-          paths.add "app/assets",          :glob => "*"
-          paths.add "app/controllers",     :eager_load => true
-          paths.add "app/helpers",         :eager_load => true
-          paths.add "app/models",          :eager_load => true
-          paths.add "app/mailers",         :eager_load => true
+
+          paths.add "app",                 eager_load: true, glob: "{*,*/concerns}"
+          paths.add "app/assets",          glob: "*"
+          paths.add "app/controllers",     eager_load: true
+          paths.add "app/channels",        eager_load: true, glob: "**/*_channel.rb"
+          paths.add "app/helpers",         eager_load: true
+          paths.add "app/models",          eager_load: true
+          paths.add "app/mailers",         eager_load: true
           paths.add "app/views"
-          paths.add "lib",                 :load_path => true
-          paths.add "lib/assets",          :glob => "*"
-          paths.add "lib/tasks",           :glob => "**/*.rake"
+
+          paths.add "lib",                 load_path: true
+          paths.add "lib/assets",          glob: "*"
+          paths.add "lib/tasks",           glob: "**/*.rake"
+
           paths.add "config"
-          paths.add "config/environments", :glob => "#{Rails.env}.rb"
-          paths.add "config/initializers", :glob => "**/*.rb"
-          paths.add "config/locales",      :glob => "*.{rb,yml}"
-          paths.add "config/routes",       :with => "config/routes.rb"
+          paths.add "config/environments", glob: "#{Rails.env}.rb"
+          paths.add "config/initializers", glob: "**/*.rb"
+          paths.add "config/locales",      glob: "*.{rb,yml}"
+          paths.add "config/routes.rb"
+
           paths.add "db"
           paths.add "db/migrate"
-          paths.add "db/seeds",            :with => "db/seeds.rb"
-          paths.add "vendor",              :load_path => true
-          paths.add "vendor/assets",       :glob => "*"
+          paths.add "db/seeds.rb"
+
+          paths.add "vendor",              load_path: true
+          paths.add "vendor/assets",       glob: "*"
+
           paths
         end
       end

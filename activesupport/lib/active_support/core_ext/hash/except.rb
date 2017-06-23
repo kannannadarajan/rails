@@ -1,21 +1,20 @@
 class Hash
-  # Return a hash that includes everything but the given keys. This is useful for
-  # limiting a set of parameters to everything but a few known toggles:
+  # Returns a hash that includes everything except given keys.
+  #   hash = { a: true, b: false, c: nil }
+  #   hash.except(:c)     # => { a: true, b: false }
+  #   hash.except(:a, :b) # => { c: nil }
+  #   hash                # => { a: true, b: false, c: nil }
   #
-  #   @person.update_attributes(params[:person].except(:admin))
-  #
-  # If the receiver responds to +convert_key+, the method is called on each of the
-  # arguments. This allows +except+ to play nice with hashes with indifferent access
-  # for instance:
-  #
-  #   {:a => 1}.with_indifferent_access.except(:a)  # => {}
-  #   {:a => 1}.with_indifferent_access.except("a") # => {}
-  #
+  # This is useful for limiting a set of parameters to everything but a few known toggles:
+  #   @person.update(params[:person].except(:admin))
   def except(*keys)
     dup.except!(*keys)
   end
 
-  # Replaces the hash without the given keys.
+  # Removes the given keys from hash and returns it.
+  #   hash = { a: true, b: false, c: nil }
+  #   hash.except!(:c) # => { a: true, b: false }
+  #   hash             # => { a: true, b: false }
   def except!(*keys)
     keys.each { |key| delete(key) }
     self

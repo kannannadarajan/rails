@@ -1,5 +1,5 @@
 #--
-# Copyright (c) 2004-2012 David Heinemeier Hansson
+# Copyright (c) 2004-2017 David Heinemeier Hansson
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -21,80 +21,92 @@
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #++
 
-require 'active_support'
-require 'active_support/i18n'
-require 'active_model'
-require 'arel'
+require "active_support"
+require "active_support/rails"
+require "active_model"
+require "arel"
 
-require 'active_record/version'
+require "active_record/version"
+require "active_record/attribute_set"
 
 module ActiveRecord
   extend ActiveSupport::Autoload
 
+  autoload :Attribute
+  autoload :Base
+  autoload :Callbacks
+  autoload :Core
+  autoload :ConnectionHandling
+  autoload :CounterCache
+  autoload :DynamicMatchers
+  autoload :Enum
+  autoload :InternalMetadata
+  autoload :Explain
+  autoload :Inheritance
+  autoload :Integration
+  autoload :Migration
+  autoload :Migrator, "active_record/migration"
+  autoload :ModelSchema
+  autoload :NestedAttributes
+  autoload :NoTouching
+  autoload :TouchLater
+  autoload :Persistence
+  autoload :QueryCache
+  autoload :Querying
+  autoload :CollectionCacheKey
+  autoload :ReadonlyAttributes
+  autoload :RecordInvalid, "active_record/validations"
+  autoload :Reflection
+  autoload :RuntimeRegistry
+  autoload :Sanitization
+  autoload :Schema
+  autoload :SchemaDumper
+  autoload :SchemaMigration
+  autoload :Scoping
+  autoload :Serialization
+  autoload :StatementCache
+  autoload :Store
+  autoload :Suppressor
+  autoload :Timestamp
+  autoload :Transactions
+  autoload :Translation
+  autoload :Validations
+  autoload :SecureToken
+
   eager_autoload do
-    autoload :ActiveRecordError, 'active_record/errors'
-    autoload :ConnectionNotEstablished, 'active_record/errors'
-    autoload :ConnectionAdapters, 'active_record/connection_adapters/abstract_adapter'
+    autoload :ActiveRecordError, "active_record/errors"
+    autoload :ConnectionNotEstablished, "active_record/errors"
+    autoload :ConnectionAdapters, "active_record/connection_adapters/abstract_adapter"
 
     autoload :Aggregations
     autoload :Associations
-    autoload :AttributeMethods
     autoload :AttributeAssignment
+    autoload :AttributeMethods
     autoload :AutosaveAssociation
 
+    autoload :LegacyYamlAdapter
+
     autoload :Relation
+    autoload :AssociationRelation
     autoload :NullRelation
 
-    autoload_under 'relation' do
+    autoload_under "relation" do
       autoload :QueryMethods
       autoload :FinderMethods
       autoload :Calculations
       autoload :PredicateBuilder
       autoload :SpawnMethods
       autoload :Batches
-      autoload :Explain
       autoload :Delegation
     end
 
-    autoload :Base
-    autoload :Callbacks
-    autoload :Core
-    autoload :CounterCache
-    autoload :ConnectionHandling
-    autoload :DynamicMatchers
-    autoload :DynamicFinderMatch
-    autoload :DynamicScopeMatch
-    autoload :Explain
-    autoload :IdentityMap
-    autoload :Inheritance
-    autoload :Integration
-    autoload :Migration
-    autoload :Migrator, 'active_record/migration'
-    autoload :Model
-    autoload :ModelSchema
-    autoload :NestedAttributes
-    autoload :Observer
-    autoload :Persistence
-    autoload :QueryCache
-    autoload :Querying
-    autoload :ReadonlyAttributes
-    autoload :Reflection
     autoload :Result
-    autoload :Sanitization
-    autoload :Schema
-    autoload :SchemaDumper
-    autoload :Scoping
-    autoload :Serialization
-    autoload :SessionStore
-    autoload :Store
-    autoload :Timestamp
-    autoload :Transactions
-    autoload :Translation
-    autoload :Validations
+    autoload :TableMetadata
   end
 
   module Coders
-    autoload :YAMLColumn, 'active_record/coders/yaml_column'
+    autoload :YAMLColumn, "active_record/coders/yaml_column"
+    autoload :JSON, "active_record/coders/json"
   end
 
   module AttributeMethods
@@ -126,7 +138,6 @@ module ActiveRecord
 
     eager_autoload do
       autoload :AbstractAdapter
-      autoload :ConnectionManagement, "active_record/connection_adapters/abstract/connection_pool"
     end
   end
 
@@ -139,12 +150,32 @@ module ActiveRecord
     end
   end
 
-  autoload :TestCase
-  autoload :TestFixtures, 'active_record/fixtures'
+  module Tasks
+    extend ActiveSupport::Autoload
+
+    autoload :DatabaseTasks
+    autoload :SQLiteDatabaseTasks, "active_record/tasks/sqlite_database_tasks"
+    autoload :MySQLDatabaseTasks,  "active_record/tasks/mysql_database_tasks"
+    autoload :PostgreSQLDatabaseTasks,
+      "active_record/tasks/postgresql_database_tasks"
+  end
+
+  autoload :TestFixtures, "active_record/fixtures"
+
+  def self.eager_load!
+    super
+    ActiveRecord::Locking.eager_load!
+    ActiveRecord::Scoping.eager_load!
+    ActiveRecord::Associations.eager_load!
+    ActiveRecord::AttributeMethods.eager_load!
+    ActiveRecord::ConnectionAdapters.eager_load!
+  end
 end
 
 ActiveSupport.on_load(:active_record) do
   Arel::Table.engine = self
 end
 
-I18n.load_path << File.dirname(__FILE__) + '/active_record/locale/en.yml'
+ActiveSupport.on_load(:i18n) do
+  I18n.load_path << File.dirname(__FILE__) + "/active_record/locale/en.yml"
+end

@@ -4,7 +4,15 @@ module ActiveRecord
     #
     # CollectionAssociation is an abstract class that provides common stuff to
     # ease the implementation of association proxies that represent
-    # collections. See the class hierarchy in AssociationProxy.
+    # collections. See the class hierarchy in Association.
+    #
+    #   CollectionAssociation:
+    #     HasManyAssociation => has_many
+    #       HasManyThroughAssociation + ThroughAssociation => has_many :through
+    #
+    # The CollectionAssociation class provides common methods to the collections
+    # defined by +has_and_belongs_to_many+, +has_many+ or +has_many+ with
+    # the +:through association+ option.
     #
     # You need to be careful with assumptions regarding the target: The proxy
     # does not fetch records from the database until it needs them, but new
@@ -16,22 +24,14 @@ module ActiveRecord
     # If you need to work on all current children, new and existing records,
     # +load_target+ and the +loaded+ flag are your friends.
     class CollectionAssociation < Association #:nodoc:
-      attr_reader :proxy
-
-      def initialize(owner, reflection)
-        super
-        @proxy = CollectionProxy.new(self)
-      end
-
       # Implements the reader method, e.g. foo.items for Foo.has_many :items
-      def reader(force_reload = false)
-        if force_reload
-          klass.uncached { reload }
-        elsif stale_target?
+      def reader
+        if stale_target?
           reload
         end
 
-        proxy
+        @proxy ||= CollectionProxy.create(klass, self)
+        @proxy.reset_scope
       end
 
       # Implements the writer method, e.g. foo.items= for Foo.has_many :items
@@ -41,92 +41,74 @@ module ActiveRecord
 
       # Implements the ids reader method, e.g. foo.item_ids for Foo.has_many :items
       def ids_reader
-        if loaded? || options[:finder_sql]
-          load_target.map do |record|
-            record.send(reflection.association_primary_key)
-          end
+        if loaded?
+          target.pluck(reflection.association_primary_key)
         else
-          column  = "#{reflection.quoted_table_name}.#{reflection.association_primary_key}"
-          relation = scoped
-
-          including = (relation.eager_load_values + relation.includes_values).uniq
-
-          if including.any?
-            join_dependency = ActiveRecord::Associations::JoinDependency.new(reflection.klass, including, [])
-            relation = join_dependency.join_associations.inject(relation) do |r, association|
-              association.join_relation(r)
-            end
-          end
-
-          relation.pluck(column)
+          @association_ids ||= (
+            column = "#{reflection.quoted_table_name}.#{reflection.association_primary_key}"
+            scope.pluck(column)
+          )
         end
       end
 
       # Implements the ids writer method, e.g. foo.item_ids= for Foo.has_many :items
       def ids_writer(ids)
-        pk_column = reflection.primary_key_column
-        ids = Array(ids).reject { |id| id.blank? }
-        ids.map! { |i| pk_column.type_cast(i) }
-        replace(klass.find(ids).index_by { |r| r.id }.values_at(*ids))
+        pk_type = reflection.association_primary_key_type
+        ids = Array(ids).reject(&:blank?)
+        ids.map! { |i| pk_type.cast(i) }
+        records = klass.where(reflection.association_primary_key => ids).index_by do |r|
+          r.send(reflection.association_primary_key)
+        end.values_at(*ids).compact
+        if records.size != ids.size
+          klass.all.raise_record_not_found_exception!(ids, records.size, ids.size, reflection.association_primary_key)
+        else
+          replace(records)
+        end
       end
 
       def reset
-        @loaded = false
+        super
         @target = []
-      end
-
-      def select(select = nil)
-        if block_given?
-          load_target.select.each { |e| yield e }
-        else
-          scoped.select(select)
-        end
       end
 
       def find(*args)
         if block_given?
           load_target.find(*args) { |*block_args| yield(*block_args) }
         else
-          if options[:finder_sql]
-            find_by_scan(*args)
+          if options[:inverse_of] && loaded?
+            args_flatten = args.flatten
+            raise RecordNotFound, "Couldn't find #{scope.klass.name} without an ID" if args_flatten.blank?
+            result = find_by_scan(*args)
+
+            result_size = Array(result).size
+            if !result || result_size != args_flatten.size
+              scope.raise_record_not_found_exception!(args_flatten, result_size, args_flatten.size)
+            else
+              result
+            end
           else
-            scoped.find(*args)
+            scope.find(*args)
           end
         end
       end
 
-      def first(*args)
-        first_or_last(:first, *args)
-      end
-
-      def last(*args)
-        first_or_last(:last, *args)
-      end
-
-      def build(attributes = {}, options = {}, &block)
+      def build(attributes = {}, &block)
         if attributes.is_a?(Array)
-          attributes.collect { |attr| build(attr, options, &block) }
+          attributes.collect { |attr| build(attr, &block) }
         else
-          add_to_target(build_record(attributes, options)) do |record|
+          add_to_target(build_record(attributes)) do |record|
             yield(record) if block_given?
           end
         end
       end
 
-      def create(attributes = {}, options = {}, &block)
-        create_record(attributes, options, &block)
-      end
-
-      def create!(attributes = {}, options = {}, &block)
-        create_record(attributes, options, true, &block)
-      end
-
-      # Add +records+ to this association. Returns +self+ so method calls may be chained.
-      # Since << flattens its argument list and inserts each record, +push+ and +concat+ behave identically.
+      # Add +records+ to this association. Returns +self+ so method calls may
+      # be chained. Since << flattens its argument list and inserts each record,
+      # +push+ and +concat+ behave identically.
       def concat(*records)
-        load_target if owner.new_record?
-
+        records = records.flatten
         if owner.new_record?
+          load_target
           concat_records(records)
         else
           transaction { concat_records(records) }
@@ -148,21 +130,36 @@ module ActiveRecord
         end
       end
 
-      # Remove all records from this association
+      # Removes all records from the association without calling callbacks
+      # on the associated records. It honors the +:dependent+ option. However
+      # if the +:dependent+ value is +:destroy+ then in that case the +:delete_all+
+      # deletion strategy for the association is applied.
+      #
+      # You can force a particular deletion strategy by passing a parameter.
+      #
+      # Example:
+      #
+      # @author.books.delete_all(:nullify)
+      # @author.books.delete_all(:delete_all)
       #
       # See delete for more info.
-      def delete_all
-        delete(load_target).tap do
+      def delete_all(dependent = nil)
+        if dependent && ![:nullify, :delete_all].include?(dependent)
+          raise ArgumentError, "Valid values are :nullify or :delete_all"
+        end
+
+        dependent = if dependent
+          dependent
+        elsif options[:dependent] == :destroy
+          :delete_all
+        else
+          options[:dependent]
+        end
+
+        delete_or_nullify_all_records(dependent).tap do
           reset
           loaded!
         end
-      end
-
-      # Called when the association is declared as :dependent => :delete_all. This is
-      # an optimised version which avoids loading the records into memory. Not really
-      # for public consumption.
-      def delete_all_on_destroy
-        scoped.delete_all
       end
 
       # Destroy all the records from this association.
@@ -175,47 +172,6 @@ module ActiveRecord
         end
       end
 
-      # Calculate sum using SQL, not Enumerable
-      def sum(*args)
-        if block_given?
-          scoped.sum(*args) { |*block_args| yield(*block_args) }
-        else
-          scoped.sum(*args)
-        end
-      end
-
-      # Count all records using SQL. If the +:counter_sql+ or +:finder_sql+ option is set for the
-      # association, it will be used for the query. Otherwise, construct options and pass them with
-      # scope to the target class's +count+.
-      def count(column_name = nil, count_options = {})
-        column_name, count_options = nil, column_name if column_name.is_a?(Hash)
-
-        if options[:counter_sql] || options[:finder_sql]
-          unless count_options.blank?
-            raise ArgumentError, "If finder_sql/counter_sql is used then options cannot be passed"
-          end
-
-          reflection.klass.count_by_sql(custom_counter_sql)
-        else
-          if options[:uniq]
-            # This is needed because 'SELECT count(DISTINCT *)..' is not valid SQL.
-            column_name ||= reflection.klass.primary_key
-            count_options.merge!(:distinct => true)
-          end
-
-          value = scoped.count(column_name, count_options)
-
-          limit  = options[:limit]
-          offset = options[:offset]
-
-          if limit || offset
-            [ [value - offset.to_i, 0].max, limit.to_i ].min
-          else
-            value
-          end
-        end
-      end
-
       # Removes +records+ from this association calling +before_remove+ and
       # +after_remove+ callbacks.
       #
@@ -224,16 +180,19 @@ module ActiveRecord
       # are actually removed from the database, that depends precisely on
       # +delete_records+. They are in any case removed from the collection.
       def delete(*records)
+        return if records.empty?
+        records = find(records) if records.any? { |record| record.kind_of?(Integer) || record.kind_of?(String) }
         delete_or_destroy(records, options[:dependent])
       end
 
-      # Destroy +records+ and remove them from this association calling
-      # +before_remove+ and +after_remove+ callbacks.
+      # Deletes the +records+ and removes them from this association calling
+      # +before_remove+ , +after_remove+ , +before_destroy+ and +after_destroy+ callbacks.
       #
-      # Note that this method will _always_ remove records from the database
-      # ignoring the +:dependent+ option.
+      # Note that this method removes records from the database ignoring the
+      # +:dependent+ option.
       def destroy(*records)
-        records = find(records) if records.any? { |record| record.kind_of?(Fixnum) || record.kind_of?(String) }
+        return if records.empty?
+        records = find(records) if records.any? { |record| record.kind_of?(Integer) || record.kind_of?(String) }
         delete_or_destroy(records, :destroy)
       end
 
@@ -248,68 +207,49 @@ module ActiveRecord
       # This method is abstract in the sense that it relies on
       # +count_records+, which is a method descendants have to provide.
       def size
-        if !find_target? || (loaded? && !options[:uniq])
+        if !find_target? || loaded?
           target.size
-        elsif !loaded? && options[:group]
+        elsif !association_scope.group_values.empty?
           load_target.size
-        elsif !loaded? && !options[:uniq] && target.is_a?(Array)
-          unsaved_records = target.select { |r| r.new_record? }
+        elsif !association_scope.distinct_value && target.is_a?(Array)
+          unsaved_records = target.select(&:new_record?)
           unsaved_records.size + count_records
         else
           count_records
         end
       end
 
-      # Returns the size of the collection calling +size+ on the target.
+      # Returns true if the collection is empty.
       #
-      # If the collection has been already loaded +length+ and +size+ are
-      # equivalent. If not and you are going to need the records anyway this
-      # method will take one less query. Otherwise +size+ is more efficient.
-      def length
-        load_target.size
-      end
-
-      # Equivalent to <tt>collection.size.zero?</tt>. If the collection has
-      # not been already loaded and you are going to fetch the records anyway
-      # it is better to check <tt>collection.length.zero?</tt>.
+      # If the collection has been loaded
+      # it is equivalent to <tt>collection.size.zero?</tt>. If the
+      # collection has not been loaded, it is equivalent to
+      # <tt>collection.exists?</tt>. If the collection has not already been
+      # loaded and you are going to fetch the records anyway it is better to
+      # check <tt>collection.length.zero?</tt>.
       def empty?
-        size.zero?
-      end
-
-      def any?
-        if block_given?
-          load_target.any? { |*block_args| yield(*block_args) }
+        if loaded?
+          size.zero?
         else
-          !empty?
+          @target.blank? && !scope.exists?
         end
       end
 
-      # Returns true if the collection has more than 1 record. Equivalent to collection.size > 1.
-      def many?
-        if block_given?
-          load_target.many? { |*block_args| yield(*block_args) }
-        else
-          size > 1
-        end
-      end
-
-      def uniq(collection = load_target)
-        seen = {}
-        collection.find_all do |record|
-          seen[record.id] = true unless seen.key?(record.id)
-        end
-      end
-
-      # Replace this collection with +other_array+
-      # This will perform a diff and delete/add only records that have changed.
+      # Replace this collection with +other_array+. This will perform a diff
+      # and delete/add only records that have changed.
       def replace(other_array)
-        other_array.each { |val| raise_on_type_mismatch(val) }
+        other_array.each { |val| raise_on_type_mismatch!(val) }
         original_target = load_target.dup
 
         if owner.new_record?
           replace_records(other_array, original_target)
         else
-          transaction { replace_records(other_array, original_target) }
+          replace_common_records_in_memory(other_array, original_target)
+          if other_array != original_target
+            transaction { replace_records(other_array, original_target) }
+          else
+            other_array
+          end
         end
       end
 
@@ -318,8 +258,7 @@ module ActiveRecord
           if record.new_record?
             include_in_memory?(record)
           else
-            load_target if options[:finder_sql]
-            loaded? ? target.include?(record) : scoped.exists?(record)
+            loaded? ? target.include?(record) : scope.exists?(record.id)
           end
         else
           false
@@ -335,52 +274,46 @@ module ActiveRecord
         target
       end
 
-      def add_to_target(record)
-        callback(:before_add, record)
-        yield(record) if block_given?
-
-        if options[:uniq] && index = @target.index(record)
-          @target[index] = record
-        else
-          @target << record
+      def add_to_target(record, skip_callbacks = false, &block)
+        if association_scope.distinct_value
+          index = @target.index(record)
         end
+        replace_on_target(record, index, skip_callbacks, &block)
+      end
 
-        callback(:after_add, record)
-        set_inverse_instance(record)
+      def scope
+        scope = super
+        scope.none! if null_scope?
+        scope
+      end
 
-        record
+      def null_scope?
+        owner.new_record? && !foreign_key_present?
+      end
+
+      def find_from_target?
+        loaded? ||
+          owner.new_record? ||
+          target.any? { |record| record.new_record? || record.changed? }
       end
 
       private
 
-        def custom_counter_sql
-          if options[:counter_sql]
-            interpolate(options[:counter_sql])
-          else
-            # replace the SELECT clause with COUNT(SELECTS), preserving any hints within /* ... */
-            interpolate(options[:finder_sql]).sub(/SELECT\b(\/\*.*?\*\/ )?(.*)\bFROM\b/im) do
-              count_with = $2.to_s
-              count_with = '*' if count_with.blank? || count_with =~ /,/
-              "SELECT #{$1}COUNT(#{count_with}) FROM"
-            end
-          end
-        end
-
-        def custom_finder_sql
-          interpolate(options[:finder_sql])
-        end
-
         def find_target
-          records =
-            if options[:finder_sql]
-              reflection.klass.find_by_sql(custom_finder_sql)
-            else
-              scoped.all
-            end
+          return scope.to_a if skip_statement_cache?
 
-          records = options[:uniq] ? uniq(records) : records
-          records.each { |record| set_inverse_instance(record) }
-          records
+          conn = klass.connection
+          sc = reflection.association_scope_cache(conn, owner) do
+            StatementCache.create(conn) { |params|
+              as = AssociationScope.create { params.bind }
+              target_scope.merge as.scope(self, conn)
+            }
+          end
+
+          binds = AssociationScope.get_bind_values(owner, reflection.chain)
+          sc.execute(binds, klass, conn) do |record|
+            set_inverse_instance(record)
+          end
         end
 
         # We have some records loaded from the database (persisted) and some that are
@@ -400,7 +333,7 @@ module ActiveRecord
           persisted.map! do |record|
             if mem_record = memory.delete(record)
 
-              (record.attribute_names - mem_record.changes.keys).each do |name|
+              ((record.attribute_names & mem_record.attribute_names) - mem_record.changed_attribute_names_to_save).each do |name|
                 mem_record[name] = record[name]
               end
 
@@ -413,36 +346,40 @@ module ActiveRecord
           persisted + memory
         end
 
-        def create_record(attributes, options, raise = false, &block)
+        def _create_record(attributes, raise = false, &block)
           unless owner.persisted?
             raise ActiveRecord::RecordNotSaved, "You cannot call create unless the parent is saved"
           end
 
           if attributes.is_a?(Array)
-            attributes.collect { |attr| create_record(attr, options, raise, &block) }
+            attributes.collect { |attr| _create_record(attr, raise, &block) }
           else
             transaction do
-              add_to_target(build_record(attributes, options)) do |record|
+              add_to_target(build_record(attributes)) do |record|
                 yield(record) if block_given?
-                insert_record(record, true, raise)
+                insert_record(record, true, raise) { @_was_loaded = loaded? }
               end
             end
           end
         end
 
         # Do the relevant stuff to insert the given record into the association collection.
-        def insert_record(record, validate = true, raise = false)
-          raise NotImplementedError
+        def insert_record(record, validate = true, raise = false, &block)
+          if raise
+            record.save!(validate: validate, &block)
+          else
+            record.save(validate: validate, &block)
+          end
         end
 
         def create_scope
-          scoped.scope_for_create.stringify_keys
+          scope.scope_for_create.stringify_keys
         end
 
         def delete_or_destroy(records, method)
           records = records.flatten
-          records.each { |record| raise_on_type_mismatch(record) }
-          existing_records = records.reject { |r| r.new_record? }
+          records.each { |record| raise_on_type_mismatch!(record) }
+          existing_records = records.reject(&:new_record?)
 
           if existing_records.empty?
             remove_records(existing_records, records, method)
@@ -460,8 +397,9 @@ module ActiveRecord
           records.each { |record| callback(:after_remove, record) }
         end
 
-        # Delete the given records from the association, using one of the methods :destroy,
-        # :delete_all or :nullify (or nil, in which case a default is used).
+        # Delete the given records from the association,
+        # using one of the methods +:destroy+, +:delete_all+
+        # or +:nullify+ (or +nil+, in which case a default is used).
         def delete_records(records, method)
           raise NotImplementedError
         end
@@ -474,93 +412,89 @@ module ActiveRecord
             raise RecordNotSaved, "Failed to replace #{reflection.name} because one or more of the " \
                                   "new records could not be saved."
           end
+
+          target
         end
 
-        def concat_records(records)
+        def replace_common_records_in_memory(new_target, original_target)
+          common_records = new_target & original_target
+          common_records.each do |record|
+            skip_callbacks = true
+            replace_on_target(record, @target.index(record), skip_callbacks)
+          end
+        end
+
+        def concat_records(records, raise = false)
           result = true
 
-          records.flatten.each do |record|
-            raise_on_type_mismatch(record)
-            add_to_target(record) do |r|
-              result &&= insert_record(record) unless owner.new_record?
+          records.each do |record|
+            raise_on_type_mismatch!(record)
+            add_to_target(record) do
+              result &&= insert_record(record, true, raise) { @_was_loaded = loaded? } unless owner.new_record?
             end
           end
 
           result && records
         end
 
+        def replace_on_target(record, index, skip_callbacks)
+          callback(:before_add, record) unless skip_callbacks
+
+          set_inverse_instance(record)
+
+          @_was_loaded = true
+
+          yield(record) if block_given?
+
+          if index
+            target[index] = record
+          elsif @_was_loaded || !loaded?
+            target << record
+          end
+
+          callback(:after_add, record) unless skip_callbacks
+
+          record
+        ensure
+          @_was_loaded = nil
+        end
+
         def callback(method, record)
           callbacks_for(method).each do |callback|
-            case callback
-            when Symbol
-              owner.send(callback, record)
-            when Proc
-              callback.call(owner, record)
-            else
-              callback.send(method, owner, record)
-            end
+            callback.call(method, owner, record)
           end
         end
 
         def callbacks_for(callback_name)
           full_callback_name = "#{callback_name}_for_#{reflection.name}"
-          owner.class.send(full_callback_name.to_sym) || []
-        end
-
-        # Should we deal with assoc.first or assoc.last by issuing an independent query to
-        # the database, or by getting the target, and then taking the first/last item from that?
-        #
-        # If the args is just a non-empty options hash, go to the database.
-        #
-        # Otherwise, go to the database only if none of the following are true:
-        #   * target already loaded
-        #   * owner is new record
-        #   * custom :finder_sql exists
-        #   * target contains new or changed record(s)
-        #   * the first arg is an integer (which indicates the number of records to be returned)
-        def fetch_first_or_last_using_find?(args)
-          if args.first.is_a?(Hash)
-            true
-          else
-            !(loaded? ||
-              owner.new_record? ||
-              options[:finder_sql] ||
-              target.any? { |record| record.new_record? || record.changed? } ||
-              args.first.kind_of?(Integer))
-          end
+          owner.class.send(full_callback_name)
         end
 
         def include_in_memory?(record)
           if reflection.is_a?(ActiveRecord::Reflection::ThroughReflection)
-            owner.send(reflection.through_reflection.name).any? { |source|
-              target = source.send(reflection.source_reflection.name)
-              target.respond_to?(:include?) ? target.include?(record) : target == record
+            assoc = owner.association(reflection.through_reflection.name)
+            assoc.reader.any? { |source|
+              target_reflection = source.send(reflection.source_reflection.name)
+              target_reflection.respond_to?(:include?) ? target_reflection.include?(record) : target_reflection == record
             } || target.include?(record)
           else
             target.include?(record)
           end
         end
 
-        # If using a custom finder_sql, #find scans the entire collection.
+        # If the :inverse_of option has been
+        # specified, then #find scans the entire collection.
         def find_by_scan(*args)
           expects_array = args.first.kind_of?(Array)
-          ids           = args.flatten.compact.uniq.map { |arg| arg.to_i }
+          ids           = args.flatten.compact.map(&:to_s).uniq
 
           if ids.size == 1
             id = ids.first
-            record = load_target.detect { |r| id == r.id }
+            record = load_target.detect { |r| id == r.id.to_s }
             expects_array ? [ record ] : record
           else
-            load_target.select { |r| ids.include?(r.id) }
+            load_target.select { |r| ids.include?(r.id.to_s) }
           end
-        end
-
-        # Fetches the first/last using SQL if possible, otherwise from the target array.
-        def first_or_last(type, *args)
-          args.shift if args.first.is_a?(Hash) && args.first.empty?
-
-          collection = fetch_first_or_last_using_find?(args) ? scoped : load_target
-          collection.send(type, *args)
         end
     end
   end

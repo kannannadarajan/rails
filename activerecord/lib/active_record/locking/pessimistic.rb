@@ -3,12 +3,12 @@ module ActiveRecord
     # Locking::Pessimistic provides support for row-level locking using
     # SELECT ... FOR UPDATE and other lock types.
     #
-    # Pass <tt>:lock => true</tt> to <tt>ActiveRecord::Base.find</tt> to obtain an exclusive
+    # Chain <tt>ActiveRecord::Base#find</tt> to <tt>ActiveRecord::QueryMethods#lock</tt> to obtain an exclusive
     # lock on the selected rows:
     #   # select * from accounts where id=1 for update
-    #   Account.find(1, :lock => true)
+    #   Account.lock.find(1)
     #
-    # Pass <tt>:lock => 'some locking clause'</tt> to give a database-specific locking clause
+    # Call <tt>lock('some locking clause')</tt> to use a database-specific locking clause
     # of your own such as 'LOCK IN SHARE MODE' or 'FOR UPDATE NOWAIT'. Example:
     #
     #   Account.transaction do
@@ -26,7 +26,7 @@ module ActiveRecord
     #
     #   Account.transaction do
     #     # select * from accounts where ...
-    #     accounts = Account.where(...).all
+    #     accounts = Account.where(...)
     #     account1 = accounts.detect { |account| ... }
     #     account2 = accounts.detect { |account| ... }
     #     # select * from accounts where id=? for update
@@ -51,7 +51,7 @@ module ActiveRecord
     #   end
     #
     # Database-specific information on row locking:
-    #   MySQL: http://dev.mysql.com/doc/refman/5.1/en/innodb-locking-reads.html
+    #   MySQL: http://dev.mysql.com/doc/refman/5.7/en/innodb-locking-reads.html
     #   PostgreSQL: http://www.postgresql.org/docs/current/interactive/sql-select.html#SQL-FOR-UPDATE-SHARE
     module Pessimistic
       # Obtain a row lock on this record. Reloads the record to obtain the requested
@@ -59,12 +59,21 @@ module ActiveRecord
       # or pass true for "FOR UPDATE" (the default, an exclusive row lock). Returns
       # the locked record.
       def lock!(lock = true)
-        reload(:lock => lock) if persisted?
+        if persisted?
+          if changed?
+            ActiveSupport::Deprecation.warn(<<-MSG.squish)
+              Locking a record with unpersisted changes is deprecated and will raise an
+              exception in Rails 5.2. Use `save` to persist the changes, or `reload` to
+              discard them explicitly.
+            MSG
+          end
+          reload(lock: lock)
+        end
         self
       end
 
       # Wraps the passed block in a transaction, locking the object
-      # before yielding. You pass can the SQL locking clause
+      # before yielding. You can pass the SQL locking clause
       # as argument (see <tt>lock!</tt>).
       def with_lock(lock = true)
         transaction do

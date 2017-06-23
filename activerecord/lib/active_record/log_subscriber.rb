@@ -1,21 +1,18 @@
 module ActiveRecord
   class LogSubscriber < ActiveSupport::LogSubscriber
+    IGNORE_PAYLOAD_NAMES = ["SCHEMA", "EXPLAIN"]
+
     def self.runtime=(value)
-      Thread.current["active_record_sql_runtime"] = value
+      ActiveRecord::RuntimeRegistry.sql_runtime = value
     end
 
     def self.runtime
-      Thread.current["active_record_sql_runtime"] ||= 0
+      ActiveRecord::RuntimeRegistry.sql_runtime ||= 0
     end
 
     def self.reset_runtime
       rt, self.runtime = runtime, 0
       rt
-    end
-
-    def initialize
-      super
-      @odd_or_even = false
     end
 
     def sql(event)
@@ -24,44 +21,74 @@ module ActiveRecord
 
       payload = event.payload
 
-      return if 'SCHEMA' == payload[:name]
+      return if IGNORE_PAYLOAD_NAMES.include?(payload[:name])
 
-      name  = '%s (%.1fms)' % [payload[:name], event.duration]
-      sql   = payload[:sql].squeeze(' ')
+      name  = "#{payload[:name]} (#{event.duration.round(1)}ms)"
+      name  = "CACHE #{name}" if payload[:cached]
+      sql   = payload[:sql]
       binds = nil
 
       unless (payload[:binds] || []).empty?
-        binds = "  " + payload[:binds].map { |col,v|
-          [col.name, v]
+        casted_params = type_casted_binds(payload[:binds], payload[:type_casted_binds])
+        binds = "  " + payload[:binds].zip(casted_params).map { |attr, value|
+          render_bind(attr, value)
         }.inspect
       end
 
-      if odd?
-        name = color(name, CYAN, true)
-        sql  = color(sql, nil, true)
-      else
-        name = color(name, MAGENTA, true)
-      end
+      name = colorize_payload_name(name, payload[:name])
+      sql  = color(sql, sql_color(sql), true)
 
       debug "  #{name}  #{sql}#{binds}"
     end
 
-    def identity(event)
-      return unless logger.debug?
+    private
 
-      name = color(event.payload[:name], odd? ? CYAN : MAGENTA, true)
-      line = odd? ? color(event.payload[:line], nil, true) : event.payload[:line]
+      def type_casted_binds(binds, casted_binds)
+        casted_binds || ActiveRecord::Base.connection.type_casted_binds(binds)
+      end
 
-      debug "  #{name}  #{line}"
-    end
+      def render_bind(attr, value)
+        if attr.is_a?(Array)
+          attr = attr.first
+        elsif attr.type.binary? && attr.value
+          value = "<#{attr.value_for_database.to_s.bytesize} bytes of binary data>"
+        end
 
-    def odd?
-      @odd_or_even = !@odd_or_even
-    end
+        [attr && attr.name, value]
+      end
 
-    def logger
-      ActiveRecord::Base.logger
-    end
+      def colorize_payload_name(name, payload_name)
+        if payload_name.blank? || payload_name == "SQL" # SQL vs Model Load/Exists
+          color(name, MAGENTA, true)
+        else
+          color(name, CYAN, true)
+        end
+      end
+
+      def sql_color(sql)
+        case sql
+        when /\A\s*rollback/mi
+          RED
+        when /select .*for update/mi, /\A\s*lock/mi
+          WHITE
+        when /\A\s*select/i
+          BLUE
+        when /\A\s*insert/i
+          GREEN
+        when /\A\s*update/i
+          YELLOW
+        when /\A\s*delete/i
+          RED
+        when /transaction\s*\Z/i
+          CYAN
+        else
+          MAGENTA
+        end
+      end
+
+      def logger
+        ActiveRecord::Base.logger
+      end
   end
 end
 

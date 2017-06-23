@@ -1,8 +1,5 @@
-require 'active_support/core_ext/hash/reverse_merge'
-
 module ActiveModel
-
-  # == Active Model Translation
+  # == Active \Model \Translation
   #
   # Provides integration between your object and the Rails internationalization
   # (i18n) framework.
@@ -33,7 +30,7 @@ module ActiveModel
     # ActiveModel::Errors#full_messages and
     # ActiveModel::Translation#human_attribute_name.
     def lookup_ancestors
-      self.ancestors.select { |x| x.respond_to?(:model_name) }
+      ancestors.select { |x| x.respond_to?(:model_name) }
     end
 
     # Transforms attribute names into a more human format, such as "First name"
@@ -43,19 +40,20 @@ module ActiveModel
     #
     # Specify +options+ with additional translating options.
     def human_attribute_name(attribute, options = {})
-      defaults  = []
-      parts     = attribute.to_s.split(".", 2)
+      options   = { count: 1 }.merge!(options)
+      parts     = attribute.to_s.split(".")
       attribute = parts.pop
-      namespace = parts.pop
+      namespace = parts.join("/") unless parts.empty?
+      attributes_scope = "#{i18n_scope}.attributes"
 
       if namespace
-        lookup_ancestors.each do |klass|
-          defaults << :"#{self.i18n_scope}.attributes.#{klass.model_name.i18n_key}/#{namespace}.#{attribute}"
+        defaults = lookup_ancestors.map do |klass|
+          :"#{attributes_scope}.#{klass.model_name.i18n_key}/#{namespace}.#{attribute}"
         end
-        defaults << :"#{self.i18n_scope}.attributes.#{namespace}.#{attribute}"
+        defaults << :"#{attributes_scope}.#{namespace}.#{attribute}"
       else
-        lookup_ancestors.each do |klass|
-          defaults << :"#{self.i18n_scope}.attributes.#{klass.model_name.i18n_key}.#{attribute}"
+        defaults = lookup_ancestors.map do |klass|
+          :"#{attributes_scope}.#{klass.model_name.i18n_key}.#{attribute}"
         end
       end
 
@@ -63,7 +61,7 @@ module ActiveModel
       defaults << options.delete(:default) if options[:default]
       defaults << attribute.humanize
 
-      options.reverse_merge! :count => 1, :default => defaults
+      options[:default] = defaults
       I18n.translate(defaults.shift, options)
     end
   end

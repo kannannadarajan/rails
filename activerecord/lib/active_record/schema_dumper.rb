@@ -1,5 +1,4 @@
-require 'stringio'
-require 'active_support/core_ext/big_decimal'
+require "stringio"
 
 module ActiveRecord
   # = Active Record Schema Dumper
@@ -17,13 +16,24 @@ module ActiveRecord
     cattr_accessor :ignore_tables
     @@ignore_tables = []
 
-    def self.dump(connection=ActiveRecord::Base.connection, stream=STDOUT)
-      new(connection).dump(stream)
-      stream
+    class << self
+      def dump(connection = ActiveRecord::Base.connection, stream = STDOUT, config = ActiveRecord::Base)
+        new(connection, generate_options(config)).dump(stream)
+        stream
+      end
+
+      private
+        def generate_options(config)
+          {
+            table_name_prefix: config.table_name_prefix,
+            table_name_suffix: config.table_name_suffix
+          }
+        end
     end
 
     def dump(stream)
       header(stream)
+      extensions(stream)
       tables(stream)
       trailer(stream)
       stream
@@ -31,18 +41,14 @@ module ActiveRecord
 
     private
 
-      def initialize(connection)
+      def initialize(connection, options = {})
         @connection = connection
-        @types = @connection.native_database_types
         @version = Migrator::current_version rescue nil
+        @options = options
       end
 
       def header(stream)
-        define_params = @version ? ":version => #{@version}" : ""
-
-        if stream.respond_to?(:external_encoding)
-          stream.puts "# encoding: #{stream.external_encoding.name}"
-        end
+        define_params = @version ? "version: #{@version}" : ""
 
         stream.puts <<HEADER
 # This file is auto-generated from the current state of the database. Instead
@@ -55,7 +61,7 @@ module ActiveRecord
 # from scratch. The latter is a flawed and unsustainable approach (the more migrations
 # you'll amass, the slower it'll run and the greater likelihood for issues).
 #
-# It's strongly recommended to check this file into your version control system.
+# It's strongly recommended that you check this file into your version control system.
 
 ActiveRecord::Schema.define(#{define_params}) do
 
@@ -66,17 +72,30 @@ HEADER
         stream.puts "end"
       end
 
-      def tables(stream)
-        @connection.tables.sort.each do |tbl|
-          next if ['schema_migrations', ignore_tables].flatten.any? do |ignored|
-            case ignored
-            when String; tbl == ignored
-            when Regexp; tbl =~ ignored
-            else
-              raise StandardError, 'ActiveRecord::SchemaDumper.ignore_tables accepts an array of String and / or Regexp values.'
-            end
+      def extensions(stream)
+        return unless @connection.supports_extensions?
+        extensions = @connection.extensions
+        if extensions.any?
+          stream.puts "  # These are extensions that must be enabled in order to support this database"
+          extensions.each do |extension|
+            stream.puts "  enable_extension #{extension.inspect}"
           end
-          table(tbl, stream)
+          stream.puts
+        end
+      end
+
+      def tables(stream)
+        sorted_tables = @connection.tables.sort
+
+        sorted_tables.each do |table_name|
+          table(table_name, stream) unless ignored?(table_name)
+        end
+
+        # dump foreign keys at the end to make sure all dependent tables exist.
+        if @connection.supports_foreign_keys?
+          sorted_tables.each do |tbl|
+            foreign_keys(tbl, stream) unless ignored?(tbl)
+          end
         end
       end
 
@@ -86,78 +105,46 @@ HEADER
           tbl = StringIO.new
 
           # first dump primary key column
-          if @connection.respond_to?(:pk_and_sequence_for)
-            pk, _ = @connection.pk_and_sequence_for(table)
-          elsif @connection.respond_to?(:primary_key)
-            pk = @connection.primary_key(table)
+          pk = @connection.primary_key(table)
+
+          tbl.print "  create_table #{remove_prefix_and_suffix(table).inspect}"
+
+          case pk
+          when String
+            tbl.print ", primary_key: #{pk.inspect}" unless pk == "id"
+            pkcol = columns.detect { |c| c.name == pk }
+            pkcolspec = @connection.column_spec_for_primary_key(pkcol)
+            if pkcolspec.present?
+              tbl.print ", #{format_colspec(pkcolspec)}"
+            end
+          when Array
+            tbl.print ", primary_key: #{pk.inspect}"
+          else
+            tbl.print ", id: false"
+          end
+          tbl.print ", force: :cascade"
+
+          table_options = @connection.table_options(table)
+          if table_options.present?
+            tbl.print ", #{format_options(table_options)}"
           end
 
-          tbl.print "  create_table #{table.inspect}"
-          if columns.detect { |c| c.name == pk }
-            if pk != 'id'
-              tbl.print %Q(, :primary_key => "#{pk}")
-            end
-          else
-            tbl.print ", :id => false"
-          end
-          tbl.print ", :force => true"
           tbl.puts " do |t|"
 
           # then dump all non-primary key columns
-          column_specs = columns.map do |column|
-            raise StandardError, "Unknown type '#{column.sql_type}' for column '#{column.name}'" if @types[column.type].nil?
+          columns.each do |column|
+            raise StandardError, "Unknown type '#{column.sql_type}' for column '#{column.name}'" unless @connection.valid_type?(column.type)
             next if column.name == pk
-            spec = {}
-            spec[:name]      = column.name.inspect
-
-            # AR has an optimization which handles zero-scale decimals as integers. This
-            # code ensures that the dumper still dumps the column as a decimal.
-            spec[:type]      = if column.type == :integer && /^(numeric|decimal)/ =~ column.sql_type
-                                 'decimal'
-                               else
-                                 column.type.to_s
-                               end
-            spec[:limit]     = column.limit.inspect if column.limit != @types[column.type][:limit] && spec[:type] != 'decimal'
-            spec[:precision] = column.precision.inspect if column.precision
-            spec[:scale]     = column.scale.inspect if column.scale
-            spec[:null]      = 'false' unless column.null
-            spec[:default]   = default_string(column.default) if column.has_default?
-            (spec.keys - [:name, :type]).each{ |k| spec[k].insert(0, "#{k.inspect} => ")}
-            spec
-          end.compact
-
-          # find all migration keys used in this table
-          keys = [:name, :limit, :precision, :scale, :default, :null]
-
-          # figure out the lengths for each column based on above keys
-          lengths = keys.map { |key|
-            column_specs.map { |spec|
-              spec[key] ? spec[key].length + 2 : 0
-            }.max
-          }
-
-          # the string we're going to sprintf our values against, with standardized column widths
-          format_string = lengths.map{ |len| "%-#{len}s" }
-
-          # find the max length for the 'type' column, which is special
-          type_length = column_specs.map{ |column| column[:type].length }.max
-
-          # add column type definition to our format string
-          format_string.unshift "    t.%-#{type_length}s "
-
-          format_string *= ''
-
-          column_specs.each do |colspec|
-            values = keys.zip(lengths).map{ |key, len| colspec.key?(key) ? colspec[key] + ", " : " " * len }
-            values.unshift colspec[:type]
-            tbl.print((format_string % values).gsub(/,\s*$/, ''))
+            type, colspec = @connection.column_spec(column)
+            tbl.print "    t.#{type} #{column.name.inspect}"
+            tbl.print ", #{format_colspec(colspec)}" if colspec.present?
             tbl.puts
           end
 
+          indexes_in_create(table, tbl)
+
           tbl.puts "  end"
           tbl.puts
-
-          indexes(table, tbl)
 
           tbl.rewind
           stream.print tbl.read
@@ -170,40 +157,88 @@ HEADER
         stream
       end
 
-      def default_string(value)
-        case value
-        when BigDecimal
-          value.to_s
-        when Date, DateTime, Time
-          "'" + value.to_s(:db) + "'"
-        else
-          value.inspect
-        end
-      end
-
+      # Keep it for indexing materialized views
       def indexes(table, stream)
         if (indexes = @connection.indexes(table)).any?
           add_index_statements = indexes.map do |index|
-            statement_parts = [
-              ('add_index ' + index.table.inspect),
-              index.columns.inspect,
-              (':name => ' + index.name.inspect),
-            ]
-            statement_parts << ':unique => true' if index.unique
-
-            index_lengths = (index.lengths || []).compact
-            statement_parts << (':length => ' + Hash[index.columns.zip(index.lengths)].inspect) unless index_lengths.empty?
-
-            index_orders = (index.orders || {})
-            statement_parts << (':order => ' + index.orders.inspect) unless index_orders.empty?
-
-            statement_parts << (':where => ' + index.where.inspect) if index.where
-
-            '  ' + statement_parts.join(', ')
+            table_name = remove_prefix_and_suffix(index.table).inspect
+            "  add_index #{([table_name] + index_parts(index)).join(', ')}"
           end
 
           stream.puts add_index_statements.sort.join("\n")
           stream.puts
+        end
+      end
+
+      def indexes_in_create(table, stream)
+        if (indexes = @connection.indexes(table)).any?
+          index_statements = indexes.map do |index|
+            "    t.index #{index_parts(index).join(', ')}"
+          end
+          stream.puts index_statements.sort.join("\n")
+        end
+      end
+
+      def index_parts(index)
+        index_parts = [
+          index.columns.inspect,
+          "name: #{index.name.inspect}",
+        ]
+        index_parts << "unique: true" if index.unique
+        index_parts << "length: { #{format_options(index.lengths)} }" if index.lengths.present?
+        index_parts << "order: { #{format_options(index.orders)} }" if index.orders.present?
+        index_parts << "where: #{index.where.inspect}" if index.where
+        index_parts << "using: #{index.using.inspect}" if !@connection.default_index_type?(index)
+        index_parts << "type: #{index.type.inspect}" if index.type
+        index_parts << "comment: #{index.comment.inspect}" if index.comment
+        index_parts
+      end
+
+      def foreign_keys(table, stream)
+        if (foreign_keys = @connection.foreign_keys(table)).any?
+          add_foreign_key_statements = foreign_keys.map do |foreign_key|
+            parts = [
+              "add_foreign_key #{remove_prefix_and_suffix(foreign_key.from_table).inspect}",
+              remove_prefix_and_suffix(foreign_key.to_table).inspect,
+            ]
+
+            if foreign_key.column != @connection.foreign_key_column_for(foreign_key.to_table)
+              parts << "column: #{foreign_key.column.inspect}"
+            end
+
+            if foreign_key.custom_primary_key?
+              parts << "primary_key: #{foreign_key.primary_key.inspect}"
+            end
+
+            if foreign_key.name !~ /^fk_rails_[0-9a-f]{10}$/
+              parts << "name: #{foreign_key.name.inspect}"
+            end
+
+            parts << "on_update: #{foreign_key.on_update.inspect}" if foreign_key.on_update
+            parts << "on_delete: #{foreign_key.on_delete.inspect}" if foreign_key.on_delete
+
+            "  #{parts.join(', ')}"
+          end
+
+          stream.puts add_foreign_key_statements.sort.join("\n")
+        end
+      end
+
+      def format_colspec(colspec)
+        colspec.map { |key, value| "#{key}: #{value}" }.join(", ")
+      end
+
+      def format_options(options)
+        options.map { |key, value| "#{key}: #{value.inspect}" }.join(", ")
+      end
+
+      def remove_prefix_and_suffix(table)
+        table.gsub(/^(#{@options[:table_name_prefix]})(.+)(#{@options[:table_name_suffix]})$/,  "\\2")
+      end
+
+      def ignored?(table_name)
+        [ActiveRecord::Base.schema_migrations_table_name, ActiveRecord::Base.internal_metadata_table_name, ignore_tables].flatten.any? do |ignored|
+          ignored === remove_prefix_and_suffix(table_name)
         end
       end
   end

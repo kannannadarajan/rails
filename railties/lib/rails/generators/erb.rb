@@ -1,21 +1,25 @@
-require 'rails/generators/named_base'
+require "rails/generators/named_base"
 
-module Erb
-  module Generators
+module Erb # :nodoc:
+  module Generators # :nodoc:
     class Base < Rails::Generators::NamedBase #:nodoc:
-      protected
+      private
 
-      def format
-        :html
-      end
+        def formats
+          [format]
+        end
 
-      def handler
-        :erb
-      end
+        def format
+          :html
+        end
 
-      def filename_with_extensions(name)
-        [name, format, handler].compact.join(".")
-      end
+        def handler
+          :erb
+        end
+
+        def filename_with_extensions(name, file_format = format)
+          [name, file_format, handler].compact.join(".")
+        end
     end
   end
 end

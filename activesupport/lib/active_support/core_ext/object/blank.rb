@@ -1,39 +1,45 @@
-# encoding: utf-8
+require "active_support/core_ext/regexp"
 
 class Object
   # An object is blank if it's false, empty, or a whitespace string.
-  # For example, "", "   ", +nil+, [], and {} are all blank.
+  # For example, +false+, '', '   ', +nil+, [], and {} are all blank.
   #
-  # This simplifies:
+  # This simplifies
   #
-  #   if address.nil? || address.empty?
+  #   !address || address.empty?
   #
-  # ...to:
+  # to
   #
-  #   if address.blank?
+  #   address.blank?
+  #
+  # @return [true, false]
   def blank?
-    respond_to?(:empty?) ? empty? : !self
+    respond_to?(:empty?) ? !!empty? : !self
   end
 
-  # An object is present if it's not <tt>blank?</tt>.
+  # An object is present if it's not blank.
+  #
+  # @return [true, false]
   def present?
     !blank?
   end
 
-  # Returns object if it's <tt>present?</tt> otherwise returns +nil+.
-  # <tt>object.presence</tt> is equivalent to <tt>object.present? ? object : nil</tt>.
+  # Returns the receiver if it's present otherwise returns +nil+.
+  # <tt>object.presence</tt> is equivalent to
   #
-  # This is handy for any representation of objects where blank is the same
-  # as not present at all. For example, this simplifies a common check for
-  # HTTP POST/query parameters:
+  #    object.present? ? object : nil
+  #
+  # For example, something like
   #
   #   state   = params[:state]   if params[:state].present?
   #   country = params[:country] if params[:country].present?
   #   region  = state || country || 'US'
   #
-  # ...becomes:
+  # becomes
   #
   #   region = params[:state].presence || params[:country].presence || 'US'
+  #
+  # @return [Object]
   def presence
     self if present?
   end
@@ -44,6 +50,7 @@ class NilClass
   #
   #   nil.blank? # => true
   #
+  # @return [true]
   def blank?
     true
   end
@@ -54,6 +61,7 @@ class FalseClass
   #
   #   false.blank? # => true
   #
+  # @return [true]
   def blank?
     true
   end
@@ -64,6 +72,7 @@ class TrueClass
   #
   #   true.blank? # => false
   #
+  # @return [false]
   def blank?
     false
   end
@@ -75,6 +84,7 @@ class Array
   #   [].blank?      # => true
   #   [1,2,3].blank? # => false
   #
+  # @return [true, false]
   alias_method :blank?, :empty?
 end
 
@@ -82,21 +92,32 @@ class Hash
   # A hash is blank if it's empty:
   #
   #   {}.blank?                # => true
-  #   {:key => 'value'}.blank? # => false
+  #   { key: 'value' }.blank?  # => false
   #
+  # @return [true, false]
   alias_method :blank?, :empty?
 end
 
 class String
+  BLANK_RE = /\A[[:space:]]*\z/
+
   # A string is blank if it's empty or contains whitespaces only:
   #
-  #   "".blank?                 # => true
-  #   "   ".blank?              # => true
-  #   "　".blank?               # => true
-  #   " something here ".blank? # => false
+  #   ''.blank?       # => true
+  #   '   '.blank?    # => true
+  #   "\t\n\r".blank? # => true
+  #   ' blah '.blank? # => false
   #
+  # Unicode whitespace is supported:
+  #
+  #   "\u00a0".blank? # => true
+  #
+  # @return [true, false]
   def blank?
-    self !~ /[^[:space:]]/
+    # The regexp that matches blank strings is expensive. For the case of empty
+    # strings we can speed up this method (~3.5x) with an empty? call. The
+    # penalty for the rest of strings is marginal.
+    empty? || BLANK_RE.match?(self)
   end
 end
 
@@ -106,6 +127,18 @@ class Numeric #:nodoc:
   #   1.blank? # => false
   #   0.blank? # => false
   #
+  # @return [false]
+  def blank?
+    false
+  end
+end
+
+class Time #:nodoc:
+  # No Time is blank:
+  #
+  #   Time.now.blank? # => false
+  #
+  # @return [false]
   def blank?
     false
   end

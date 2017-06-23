@@ -1,27 +1,27 @@
-require 'abstract_unit'
+require "abstract_unit"
 
 module RenderTemplate
   class WithoutLayoutController < ActionController::Base
-
     self.view_paths = [ActionView::FixtureResolver.new(
       "test/basic.html.erb"        => "Hello from basic.html.erb",
       "shared.html.erb"            => "Elastica",
       "locals.html.erb"            => "The secret is <%= secret %>",
       "xml_template.xml.builder"   => "xml.html do\n  xml.p 'Hello'\nend",
       "with_raw.html.erb"          => "Hello <%=raw '<strong>this is raw</strong>' %>",
-      "with_implicit_raw.html.erb" => "Hello <%== '<strong>this is also raw</strong>' %>",
+      "with_implicit_raw.html.erb" => "Hello <%== '<strong>this is also raw</strong>' %> in an html template",
+      "with_implicit_raw.text.erb" => "Hello <%== '<strong>this is also raw</strong>' %> in a text template",
       "test/with_json.html.erb"    => "<%= render :template => 'test/with_json', :formats => [:json] %>",
       "test/with_json.json.erb"    => "<%= render :template => 'test/final', :formats => [:json]  %>",
       "test/final.json.erb"        => "{ final: json }",
-      "test/with_error.html.erb"   => "<%= idontexist %>"
+      "test/with_error.html.erb"   => "<%= raise 'i do not exist' %>"
     )]
 
     def index
-      render :template => "test/basic"
+      render template: "test/basic"
     end
 
     def html_with_json_inside_json
-      render :template => "test/with_json"
+      render template: "test/with_json"
     end
 
     def index_without_key
@@ -29,42 +29,46 @@ module RenderTemplate
     end
 
     def in_top_directory
-      render :template => 'shared'
+      render template: "shared"
     end
 
     def in_top_directory_with_slash
-      render :template => '/shared'
+      render template: "/shared"
     end
 
     def in_top_directory_with_slash_without_key
-      render '/shared'
+      render "/shared"
     end
 
     def with_locals
-      render :template => "locals", :locals => { :secret => 'area51' }
+      render template: "locals", locals: { secret: "area51" }
+    end
+
+    def with_locals_without_key
+      render "locals", locals: { secret: "area51" }
     end
 
     def builder_template
-      render :template => "xml_template"
+      render template: "xml_template"
     end
 
     def with_raw
-      render :template => "with_raw"
+      render template: "with_raw"
     end
 
     def with_implicit_raw
-      render :template => "with_implicit_raw"
+      render template: "with_implicit_raw"
     end
 
     def with_error
-      render :template => "test/with_error"
+      render template: "test/with_error"
     end
 
     private
 
-    def show_detailed_exceptions?
-      request.local?
-    end
+      def show_detailed_exceptions?
+        request.local?
+      end
   end
 
   class TestWithoutLayout < Rack::TestCase
@@ -100,8 +104,13 @@ module RenderTemplate
       assert_response "The secret is area51"
     end
 
+    test "rendering a template with local variables without key" do
+      get :with_locals
+      assert_response "The secret is area51"
+    end
+
     test "rendering a builder template" do
-      get :builder_template, "format" => "xml"
+      get :builder_template, params: { "format" => "xml" }
       assert_response "<html>\n  <p>Hello</p>\n</html>\n"
     end
 
@@ -113,7 +122,12 @@ module RenderTemplate
 
       get :with_implicit_raw
 
-      assert_body "Hello <strong>this is also raw</strong>"
+      assert_body "Hello <strong>this is also raw</strong> in an html template"
+      assert_status 200
+
+      get :with_implicit_raw, params: { format: "text" }
+
+      assert_body "Hello <strong>this is also raw</strong> in a text template"
       assert_status 200
     end
 
@@ -126,7 +140,7 @@ module RenderTemplate
     test "rendering a template with error properly excerts the code" do
       get :with_error
       assert_status 500
-      assert_match "undefined local variable or method `idontexist'", response.body
+      assert_match "i do not exist", response.body
     end
   end
 
@@ -139,32 +153,30 @@ module RenderTemplate
     )]
 
     def index
-      render :template => "test/basic"
+      render template: "test/basic"
     end
 
     def with_layout
-      render :template => "test/basic", :layout => true
+      render template: "test/basic", layout: true
     end
 
     def with_layout_false
-      render :template => "test/basic", :layout => false
+      render template: "test/basic", layout: false
     end
 
     def with_layout_nil
-      render :template => "test/basic", :layout => nil
+      render template: "test/basic", layout: nil
     end
 
     def with_custom_layout
-      render :template => "test/basic", :layout => "greetings"
+      render template: "test/basic", layout: "greetings"
     end
   end
 
   class TestWithLayout < Rack::TestCase
-    describe "Rendering with :template using implicit or explicit layout"
-
     test "rendering with implicit layout" do
       with_routing do |set|
-        set.draw { match ':controller', :action => :index }
+        set.draw { ActiveSupport::Deprecation.silence { get ":controller", action: :index } }
 
         get "/render_template/with_layout"
 
@@ -173,21 +185,21 @@ module RenderTemplate
       end
     end
 
-    test "rendering with layout => :true" do
+    test "rendering with layout => true" do
       get "/render_template/with_layout/with_layout"
 
       assert_body "Hello from basic.html.erb, I'm here!"
       assert_status 200
     end
 
-    test "rendering with layout => :false" do
+    test "rendering with layout => false" do
       get "/render_template/with_layout/with_layout_false"
 
       assert_body "Hello from basic.html.erb"
       assert_status 200
     end
 
-    test "rendering with layout => :nil" do
+    test "rendering with layout => nil" do
       get "/render_template/with_layout/with_layout_nil"
 
       assert_body "Hello from basic.html.erb"
@@ -210,7 +222,7 @@ module RenderTemplate
       )]
 
       def with_forward_slash
-        render :template => "/test/basic"
+        render template: "/test/basic"
       end
     end
 

@@ -1,12 +1,13 @@
-require 'isolation/abstract_unit'
+require "isolation/abstract_unit"
+require "env_helpers"
 
 module ApplicationTests
   class RunnerTest < ActiveSupport::TestCase
     include ActiveSupport::Testing::Isolation
+    include EnvHelpers
 
     def setup
       build_app
-      boot_rails
 
       # Lets create a model so we have something to play with
       app_file "app/models/user.rb", <<-MODEL
@@ -23,39 +24,102 @@ module ApplicationTests
     end
 
     def test_should_include_runner_in_shebang_line_in_help_without_option
-      assert_match "/rails runner", Dir.chdir(app_path) { `bundle exec rails runner` }
+      assert_match "/rails runner", Dir.chdir(app_path) { `bin/rails runner` }
     end
 
     def test_should_include_runner_in_shebang_line_in_help
-      assert_match "/rails runner", Dir.chdir(app_path) { `bundle exec rails runner --help` }
+      assert_match "/rails runner", Dir.chdir(app_path) { `bin/rails runner --help` }
     end
 
     def test_should_run_ruby_statement
-      assert_match "42", Dir.chdir(app_path) { `bundle exec rails runner "puts User.count"` }
+      assert_match "42", Dir.chdir(app_path) { `bin/rails runner "puts User.count"` }
+    end
+
+    def test_should_set_argv_when_running_code
+      output = Dir.chdir(app_path) {
+        # Both long and short args, at start and end of ARGV
+        `bin/rails runner "puts ARGV.join(',')" --foo a1 -b a2 a3 --moo`
+      }
+      assert_equal "--foo,a1,-b,a2,a3,--moo", output.chomp
     end
 
     def test_should_run_file
-      app_file "script/count_users.rb", <<-SCRIPT
+      app_file "bin/count_users.rb", <<-SCRIPT
       puts User.count
       SCRIPT
 
-      assert_match "42", Dir.chdir(app_path) { `bundle exec rails runner "script/count_users.rb"` }
+      assert_match "42", Dir.chdir(app_path) { `bin/rails runner "bin/count_users.rb"` }
+    end
+
+    def test_no_minitest_loaded_in_production_mode
+      app_file "bin/print_features.rb", <<-SCRIPT
+      p $LOADED_FEATURES.grep(/minitest/)
+      SCRIPT
+      assert_match "[]", Dir.chdir(app_path) {
+        `RAILS_ENV=production bin/rails runner "bin/print_features.rb"`
+      }
     end
 
     def test_should_set_dollar_0_to_file
-      app_file "script/dollar0.rb", <<-SCRIPT
+      app_file "bin/dollar0.rb", <<-SCRIPT
       puts $0
       SCRIPT
 
-      assert_match "script/dollar0.rb", Dir.chdir(app_path) { `bundle exec rails runner "script/dollar0.rb"` }
+      assert_match "bin/dollar0.rb", Dir.chdir(app_path) { `bin/rails runner "bin/dollar0.rb"` }
     end
 
     def test_should_set_dollar_program_name_to_file
-      app_file "script/program_name.rb", <<-SCRIPT
+      app_file "bin/program_name.rb", <<-SCRIPT
       puts $PROGRAM_NAME
       SCRIPT
 
-      assert_match "script/program_name.rb", Dir.chdir(app_path) { `bundle exec rails runner "script/program_name.rb"` }
+      assert_match "bin/program_name.rb", Dir.chdir(app_path) { `bin/rails runner "bin/program_name.rb"` }
+    end
+
+    def test_passes_extra_args_to_file
+      app_file "bin/program_name.rb", <<-SCRIPT
+      p ARGV
+      SCRIPT
+
+      assert_match %w( a b ).to_s, Dir.chdir(app_path) { `bin/rails runner "bin/program_name.rb" a b` }
+    end
+
+    def test_with_hook
+      add_to_config <<-RUBY
+        runner do |app|
+          app.config.ran = true
+        end
+      RUBY
+
+      assert_match "true", Dir.chdir(app_path) { `bin/rails runner "puts Rails.application.config.ran"` }
+    end
+
+    def test_default_environment
+      assert_match "development", Dir.chdir(app_path) { `bin/rails runner "puts Rails.env"` }
+    end
+
+    def test_runner_detects_syntax_errors
+      output = Dir.chdir(app_path) { `bin/rails runner "puts 'hello world" 2>&1` }
+      assert_not $?.success?
+      assert_match "unterminated string meets end of file", output
+    end
+
+    def test_runner_detects_bad_script_name
+      output = Dir.chdir(app_path) { `bin/rails runner "iuiqwiourowe" 2>&1` }
+      assert_not $?.success?
+      assert_match "undefined local variable or method `iuiqwiourowe' for", output
+    end
+
+    def test_environment_with_rails_env
+      with_rails_env "production" do
+        assert_match "production", Dir.chdir(app_path) { `bin/rails runner "puts Rails.env"` }
+      end
+    end
+
+    def test_environment_with_rack_env
+      with_rack_env "production" do
+        assert_match "production", Dir.chdir(app_path) { `bin/rails runner "puts Rails.env"` }
+      end
     end
   end
 end

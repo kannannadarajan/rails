@@ -1,5 +1,4 @@
 module ActiveRecord
-
   # = Active Record Errors
   #
   # Generic Active Record exception class.
@@ -7,8 +6,10 @@ module ActiveRecord
   end
 
   # Raised when the single-table inheritance mechanism fails to locate the subclass
-  # (for example due to improper usage of column that +inheritance_column+ points to).
-  class SubclassNotFound < ActiveRecordError #:nodoc:
+  # (for example due to improper usage of column that
+  # {ActiveRecord::Base.inheritance_column}[rdoc-ref:ModelSchema::ClassMethods#inheritance_column]
+  # points to).
+  class SubclassNotFound < ActiveRecordError
   end
 
   # Raised when an object assigned to an association has an incorrect type.
@@ -22,7 +23,7 @@ module ActiveRecord
   #   end
   #
   #   # Comments are not patches, this assignment raises AssociationTypeMismatch.
-  #   @ticket.patches << Comment.new(:content => "Please attach tests to your patch.")
+  #   @ticket.patches << Comment.new(content: "Please attach tests to your patch.")
   class AssociationTypeMismatch < ActiveRecordError
   end
 
@@ -30,47 +31,78 @@ module ActiveRecord
   class SerializationTypeMismatch < ActiveRecordError
   end
 
-  # Raised when adapter not specified on connection (or configuration file <tt>config/database.yml</tt>
-  # misses adapter field).
+  # Raised when adapter not specified on connection (or configuration file
+  # +config/database.yml+ misses adapter field).
   class AdapterNotSpecified < ActiveRecordError
   end
 
-  # Raised when Active Record cannot find database adapter specified in <tt>config/database.yml</tt> or programmatically.
+  # Raised when Active Record cannot find database adapter specified in
+  # +config/database.yml+ or programmatically.
   class AdapterNotFound < ActiveRecordError
   end
 
-  # Raised when connection to the database could not been established (for example when <tt>connection=</tt>
-  # is given a nil object).
+  # Raised when connection to the database could not been established (for example when
+  # {ActiveRecord::Base.connection=}[rdoc-ref:ConnectionHandling#connection]
+  # is given a +nil+ object).
   class ConnectionNotEstablished < ActiveRecordError
   end
 
-  # Raised when Active Record cannot find record by given id or set of ids.
+  # Raised when Active Record cannot find a record by given id or set of ids.
   class RecordNotFound < ActiveRecordError
-  end
+    attr_reader :model, :primary_key, :id
 
-  # Raised by ActiveRecord::Base.save! and ActiveRecord::Base.create! methods when record cannot be
-  # saved because record is invalid.
-  class RecordNotSaved < ActiveRecordError
-  end
+    def initialize(message = nil, model = nil, primary_key = nil, id = nil)
+      @primary_key = primary_key
+      @model = model
+      @id = id
 
-  # Raised when SQL statement cannot be executed by the database (for example, it's often the case for
-  # MySQL when Ruby driver used is too old).
-  class StatementInvalid < ActiveRecordError
-  end
-
-  # Raised when SQL statement is invalid and the application gets a blank result.
-  class ThrowResult < ActiveRecordError
-  end
-
-  # Parent class for all specific exceptions which wrap database driver exceptions
-  # provides access to the original exception also.
-  class WrappedDatabaseException < StatementInvalid
-    attr_reader :original_exception
-
-    def initialize(message, original_exception)
       super(message)
-      @original_exception = original_exception
     end
+  end
+
+  # Raised by {ActiveRecord::Base#save!}[rdoc-ref:Persistence#save!] and
+  # {ActiveRecord::Base.create!}[rdoc-ref:Persistence::ClassMethods#create!]
+  # methods when a record is invalid and can not be saved.
+  class RecordNotSaved < ActiveRecordError
+    attr_reader :record
+
+    def initialize(message = nil, record = nil)
+      @record = record
+      super(message)
+    end
+  end
+
+  # Raised by {ActiveRecord::Base#destroy!}[rdoc-ref:Persistence#destroy!]
+  # when a call to {#destroy}[rdoc-ref:Persistence#destroy!]
+  # would return false.
+  #
+  #   begin
+  #     complex_operation_that_internally_calls_destroy!
+  #   rescue ActiveRecord::RecordNotDestroyed => invalid
+  #     puts invalid.record.errors
+  #   end
+  #
+  class RecordNotDestroyed < ActiveRecordError
+    attr_reader :record
+
+    def initialize(message = nil, record = nil)
+      @record = record
+      super(message)
+    end
+  end
+
+  # Superclass for all database execution errors.
+  #
+  # Wraps the underlying database error as +cause+.
+  class StatementInvalid < ActiveRecordError
+    def initialize(message = nil)
+      super(message || $!.try(:message))
+    end
+  end
+
+  # Defunct wrapper class kept for compatibility.
+  # StatementInvalid wraps the original exception now.
+  class WrappedDatabaseException < StatementInvalid
   end
 
   # Raised when a record cannot be inserted because it would violate a uniqueness constraint.
@@ -81,38 +113,90 @@ module ActiveRecord
   class InvalidForeignKey < WrappedDatabaseException
   end
 
-  # Raised when number of bind variables in statement given to <tt>:condition</tt> key (for example,
-  # when using +find+ method)
-  # does not match number of expected variables.
+  # Raised when a foreign key constraint cannot be added because the column type does not match the referenced column type.
+  class MismatchedForeignKey < StatementInvalid
+    def initialize(adapter = nil, message: nil, table: nil, foreign_key: nil, target_table: nil, primary_key: nil)
+      @adapter = adapter
+      if table
+        msg = <<-EOM.strip_heredoc
+          Column `#{foreign_key}` on table `#{table}` has a type of `#{column_type(table, foreign_key)}`.
+          This does not match column `#{primary_key}` on `#{target_table}`, which has type `#{column_type(target_table, primary_key)}`.
+          To resolve this issue, change the type of the `#{foreign_key}` column on `#{table}` to be :integer. (For example `t.integer #{foreign_key}`).
+        EOM
+      else
+        msg = <<-EOM
+          There is a mismatch between the foreign key and primary key column types.
+          Verify that the foreign key column type and the primary key of the associated table match types.
+        EOM
+      end
+      if message
+        msg << "\nOriginal message: #{message}"
+      end
+      super(msg)
+    end
+
+    private
+      def column_type(table, column)
+        @adapter.columns(table).detect { |c| c.name == column }.sql_type
+      end
+  end
+
+  # Raised when a record cannot be inserted or updated because it would violate a not null constraint.
+  class NotNullViolation < StatementInvalid
+  end
+
+  # Raised when a record cannot be inserted or updated because a value too long for a column type.
+  class ValueTooLong < StatementInvalid
+  end
+
+  # Raised when values that executed are out of range.
+  class RangeError < StatementInvalid
+  end
+
+  # Raised when number of bind variables in statement given to +:condition+ key
+  # (for example, when using {ActiveRecord::Base.find}[rdoc-ref:FinderMethods#find] method)
+  # does not match number of expected values supplied.
   #
-  # For example, in
+  # For example, when there are two placeholders with only one value supplied:
   #
   #   Location.where("lat = ? AND lng = ?", 53.7362)
-  #
-  # two placeholders are given but only one variable to fill them.
   class PreparedStatementInvalid < ActiveRecordError
+  end
+
+  # Raised when a given database does not exist.
+  class NoDatabaseError < StatementInvalid
+  end
+
+  # Raised when Postgres returns 'cached plan must not change result type' and
+  # we cannot retry gracefully (e.g. inside a transaction)
+  class PreparedStatementCacheExpired < StatementInvalid
   end
 
   # Raised on attempt to save stale record. Record is stale when it's being saved in another query after
   # instantiation, for example, when two users edit the same wiki page and one starts editing and saves
   # the page before the other.
   #
-  # Read more about optimistic locking in ActiveRecord::Locking module RDoc.
+  # Read more about optimistic locking in ActiveRecord::Locking module
+  # documentation.
   class StaleObjectError < ActiveRecordError
     attr_reader :record, :attempted_action
 
-    def initialize(record, attempted_action)
-      @record = record
-      @attempted_action = attempted_action
-    end
-
-    def message
-      "Attempted to #{attempted_action} a stale object: #{record.class.name}"
+    def initialize(record = nil, attempted_action = nil)
+      if record && attempted_action
+        @record = record
+        @attempted_action = attempted_action
+        super("Attempted to #{attempted_action} a stale object: #{record.class.name}.")
+      else
+        super("Stale object error.")
+      end
     end
   end
 
-  # Raised when association is being configured improperly or
-  # user tries to use offset and limit together with has_many or has_and_belongs_to_many associations.
+  # Raised when association is being configured improperly or user tries to use
+  # offset and limit together with
+  # {ActiveRecord::Base.has_many}[rdoc-ref:Associations::ClassMethods#has_many] or
+  # {ActiveRecord::Base.has_and_belongs_to_many}[rdoc-ref:Associations::ClassMethods#has_and_belongs_to_many]
+  # associations.
   class ConfigurationError < ActiveRecordError
   end
 
@@ -120,9 +204,10 @@ module ActiveRecord
   class ReadOnlyRecord < ActiveRecordError
   end
 
-  # ActiveRecord::Transactions::ClassMethods.transaction uses this exception
-  # to distinguish a deliberate rollback from other exceptional situations.
-  # Normally, raising an exception will cause the +transaction+ method to rollback
+  # {ActiveRecord::Base.transaction}[rdoc-ref:Transactions::ClassMethods#transaction]
+  # uses this exception to distinguish a deliberate rollback from other exceptional situations.
+  # Normally, raising an exception will cause the
+  # {.transaction}[rdoc-ref:Transactions::ClassMethods#transaction] method to rollback
   # the database transaction *and* pass on the exception. But if you raise an
   # ActiveRecord::Rollback exception, then the database transaction will be rolled back,
   # without passing on the exception.
@@ -150,46 +235,101 @@ module ActiveRecord
   class Rollback < ActiveRecordError
   end
 
-  # Raised when attribute has a name reserved by Active Record (when attribute has name of one of Active Record instance methods).
+  # Raised when attribute has a name reserved by Active Record (when attribute
+  # has name of one of Active Record instance methods).
   class DangerousAttributeError < ActiveRecordError
   end
 
   # Raised when unknown attributes are supplied via mass assignment.
-  class UnknownAttributeError < NoMethodError
-  end
+  UnknownAttributeError = ActiveModel::UnknownAttributeError
 
   # Raised when an error occurred while doing a mass assignment to an attribute through the
-  # <tt>attributes=</tt> method. The exception has an +attribute+ property that is the name of the
-  # offending attribute.
+  # {ActiveRecord::Base#attributes=}[rdoc-ref:AttributeAssignment#attributes=] method.
+  # The exception has an +attribute+ property that is the name of the offending attribute.
   class AttributeAssignmentError < ActiveRecordError
     attr_reader :exception, :attribute
-    def initialize(message, exception, attribute)
+
+    def initialize(message = nil, exception = nil, attribute = nil)
+      super(message)
       @exception = exception
       @attribute = attribute
-      @message = message
     end
   end
 
-  # Raised when there are multiple errors while doing a mass assignment through the +attributes+
+  # Raised when there are multiple errors while doing a mass assignment through the
+  # {ActiveRecord::Base#attributes=}[rdoc-ref:AttributeAssignment#attributes=]
   # method. The exception has an +errors+ property that contains an array of AttributeAssignmentError
   # objects, each corresponding to the error while assigning to an attribute.
   class MultiparameterAssignmentErrors < ActiveRecordError
     attr_reader :errors
-    def initialize(errors)
+
+    def initialize(errors = nil)
       @errors = errors
     end
   end
 
-  # Raised when a primary key is needed, but there is not one specified in the schema or model.
+  # Raised when a primary key is needed, but not specified in the schema or model.
   class UnknownPrimaryKey < ActiveRecordError
     attr_reader :model
 
-    def initialize(model)
-      @model = model
+    def initialize(model = nil, description = nil)
+      if model
+        message = "Unknown primary key for table #{model.table_name} in model #{model}."
+        message += "\n#{description}" if description
+        @model = model
+        super(message)
+      else
+        super("Unknown primary key.")
+      end
     end
+  end
 
-    def message
-      "Unknown primary key for table #{model.table_name} in model #{model}."
-    end
+  # Raised when a relation cannot be mutated because it's already loaded.
+  #
+  #   class Task < ActiveRecord::Base
+  #   end
+  #
+  #   relation = Task.all
+  #   relation.loaded? # => true
+  #
+  #   # Methods which try to mutate a loaded relation fail.
+  #   relation.where!(title: 'TODO')  # => ActiveRecord::ImmutableRelation
+  #   relation.limit!(5)              # => ActiveRecord::ImmutableRelation
+  class ImmutableRelation < ActiveRecordError
+  end
+
+  # TransactionIsolationError will be raised under the following conditions:
+  #
+  # * The adapter does not support setting the isolation level
+  # * You are joining an existing open transaction
+  # * You are creating a nested (savepoint) transaction
+  #
+  # The mysql2 and postgresql adapters support setting the transaction isolation level.
+  class TransactionIsolationError < ActiveRecordError
+  end
+
+  # TransactionRollbackError will be raised when a transaction is rolled
+  # back by the database due to a serialization failure or a deadlock.
+  #
+  # See the following:
+  #
+  # * http://www.postgresql.org/docs/current/static/transaction-iso.html
+  # * https://dev.mysql.com/doc/refman/5.7/en/error-messages-server.html#error_er_lock_deadlock
+  class TransactionRollbackError < StatementInvalid
+  end
+
+  # SerializationFailure will be raised when a transaction is rolled
+  # back by the database due to a serialization failure.
+  class SerializationFailure < TransactionRollbackError
+  end
+
+  # Deadlocked will be raised when a transaction is rolled
+  # back by the database when a deadlock is encountered.
+  class Deadlocked < TransactionRollbackError
+  end
+
+  # IrreversibleOrderError is raised when a relation's order is too complex for
+  # +reverse_order+ to automatically reverse.
+  class IrreversibleOrderError < ActiveRecordError
   end
 end

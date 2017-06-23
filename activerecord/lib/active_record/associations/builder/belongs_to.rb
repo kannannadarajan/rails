@@ -1,87 +1,150 @@
-require 'active_support/core_ext/object/inclusion'
-
-module ActiveRecord::Associations::Builder
+module ActiveRecord::Associations::Builder # :nodoc:
   class BelongsTo < SingularAssociation #:nodoc:
-    self.macro = :belongs_to
-
-    self.valid_options += [:foreign_type, :polymorphic, :touch]
-
-    def constructable?
-      !options[:polymorphic]
+    def self.macro
+      :belongs_to
     end
 
-    def build
-      reflection = super
-      add_counter_cache_callbacks(reflection) if options[:counter_cache]
-      add_touch_callbacks(reflection)         if options[:touch]
-      configure_dependency
-      reflection
+    def self.valid_options(options)
+      super + [:polymorphic, :touch, :counter_cache, :optional, :default]
     end
 
-    private
+    def self.valid_dependent_options
+      [:destroy, :delete]
+    end
 
-      def add_counter_cache_callbacks(reflection)
-        cache_column = reflection.counter_cache_column
-        name         = self.name
+    def self.define_callbacks(model, reflection)
+      super
+      add_counter_cache_callbacks(model, reflection) if reflection.options[:counter_cache]
+      add_touch_callbacks(model, reflection)         if reflection.options[:touch]
+      add_default_callbacks(model, reflection)       if reflection.options[:default]
+    end
 
-        method_name = "belongs_to_counter_cache_after_create_for_#{name}"
-        mixin.redefine_method(method_name) do
-          record = send(name)
-          record.class.increment_counter(cache_column, record.id) unless record.nil?
-        end
-        model.after_create(method_name)
+    def self.define_accessors(mixin, reflection)
+      super
+      add_counter_cache_methods mixin
+    end
 
-        method_name = "belongs_to_counter_cache_before_destroy_for_#{name}"
-        mixin.redefine_method(method_name) do
-          unless marked_for_destruction?
-            record = send(name)
-            record.class.decrement_counter(cache_column, record.id) unless record.nil?
-          end
-        end
-        model.before_destroy(method_name)
+    def self.add_counter_cache_methods(mixin)
+      return if mixin.method_defined? :belongs_to_counter_cache_after_update
 
-        model.send(:module_eval,
-          "#{reflection.class_name}.send(:attr_readonly,\"#{cache_column}\".intern) if defined?(#{reflection.class_name}) && #{reflection.class_name}.respond_to?(:attr_readonly)", __FILE__, __LINE__
-        )
-      end
+      mixin.class_eval do
+        def belongs_to_counter_cache_after_update(reflection)
+          foreign_key  = reflection.foreign_key
+          cache_column = reflection.counter_cache_column
 
-      def add_touch_callbacks(reflection)
-        name        = self.name
-        method_name = "belongs_to_touch_after_save_or_destroy_for_#{name}"
-        touch       = options[:touch]
-
-        mixin.redefine_method(method_name) do
-          record = send(name)
-
-          unless record.nil?
-            if touch == true
-              record.touch
+          if (@_after_create_counter_called ||= false)
+            @_after_create_counter_called = false
+          elsif (@_after_replace_counter_called ||= false)
+            @_after_replace_counter_called = false
+          elsif saved_change_to_attribute?(foreign_key) && !new_record?
+            if reflection.polymorphic?
+              model     = attribute_in_database(reflection.foreign_type).try(:constantize)
+              model_was = attribute_before_last_save(reflection.foreign_type).try(:constantize)
             else
-              record.touch(touch)
+              model     = reflection.klass
+              model_was = reflection.klass
+            end
+
+            foreign_key_was = attribute_before_last_save foreign_key
+            foreign_key     = attribute_in_database foreign_key
+
+            if foreign_key && model.respond_to?(:increment_counter)
+              model.increment_counter(cache_column, foreign_key)
+            end
+
+            if foreign_key_was && model_was.respond_to?(:decrement_counter)
+              model_was.decrement_counter(cache_column, foreign_key_was)
             end
           end
         end
-
-        model.after_save(method_name)
-        model.after_touch(method_name)
-        model.after_destroy(method_name)
       end
+    end
 
-      def configure_dependency
-        if options[:dependent]
-          unless options[:dependent].in?([:destroy, :delete])
-            raise ArgumentError, "The :dependent option expects either :destroy or :delete (#{options[:dependent].inspect})"
+    def self.add_counter_cache_callbacks(model, reflection)
+      cache_column = reflection.counter_cache_column
+
+      model.after_update lambda { |record|
+        record.belongs_to_counter_cache_after_update(reflection)
+      }
+
+      klass = reflection.class_name.safe_constantize
+      klass.attr_readonly cache_column if klass && klass.respond_to?(:attr_readonly)
+    end
+
+    def self.touch_record(o, changes, foreign_key, name, touch, touch_method) # :nodoc:
+      old_foreign_id = changes[foreign_key] && changes[foreign_key].first
+
+      if old_foreign_id
+        association = o.association(name)
+        reflection = association.reflection
+        if reflection.polymorphic?
+          foreign_type = reflection.foreign_type
+          klass = changes[foreign_type] && changes[foreign_type].first || o.public_send(foreign_type)
+          klass = klass.constantize
+        else
+          klass = association.klass
+        end
+        old_record = klass.find_by(klass.primary_key => old_foreign_id)
+
+        if old_record
+          if touch != true
+            old_record.send(touch_method, touch)
+          else
+            old_record.send(touch_method)
           end
-
-          method_name = "belongs_to_dependent_#{options[:dependent]}_for_#{name}"
-          model.send(:class_eval, <<-eoruby, __FILE__, __LINE__ + 1)
-            def #{method_name}
-              association = #{name}
-              association.#{options[:dependent]} if association
-            end
-          eoruby
-          model.after_destroy method_name
         end
       end
+
+      record = o.send name
+      if record && record.persisted?
+        if touch != true
+          record.send(touch_method, touch)
+        else
+          record.send(touch_method)
+        end
+      end
+    end
+
+    def self.add_touch_callbacks(model, reflection)
+      foreign_key = reflection.foreign_key
+      n           = reflection.name
+      touch       = reflection.options[:touch]
+
+      callback = lambda { |changes_method| lambda { |record|
+        BelongsTo.touch_record(record, record.send(changes_method), foreign_key, n, touch, belongs_to_touch_method)
+      }}
+
+      model.after_save    callback.(:saved_changes), if: :saved_changes?
+      model.after_touch   callback.(:changes_to_save)
+      model.after_destroy callback.(:changes_to_save)
+    end
+
+    def self.add_default_callbacks(model, reflection)
+      model.before_validation lambda { |o|
+        o.association(reflection.name).default(&reflection.options[:default])
+      }
+    end
+
+    def self.add_destroy_callbacks(model, reflection)
+      model.after_destroy lambda { |o| o.association(reflection.name).handle_dependency }
+    end
+
+    def self.define_validations(model, reflection)
+      if reflection.options.key?(:required)
+        reflection.options[:optional] = !reflection.options.delete(:required)
+      end
+
+      if reflection.options[:optional].nil?
+        required = model.belongs_to_required_by_default
+      else
+        required = !reflection.options[:optional]
+      end
+
+      super
+
+      if required
+        model.validates_presence_of reflection.name, message: :required
+      end
+    end
   end
 end

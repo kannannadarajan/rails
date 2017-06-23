@@ -1,5 +1,5 @@
-require 'generators/generators_test_helper'
-require 'rails/generators/rails/controller/controller_generator'
+require "generators/generators_test_helper"
+require "rails/generators/rails/controller/controller_generator"
 
 class ControllerGeneratorTest < Rails::Generators::TestCase
   include GeneratorsTestHelper
@@ -19,7 +19,7 @@ class ControllerGeneratorTest < Rails::Generators::TestCase
 
   def test_check_class_collision
     Object.send :const_set, :ObjectController, Class.new
-    content = capture(:stderr){ run_generator ["object"] }
+    content = capture(:stderr) { run_generator ["object"] }
     assert_match(/The name 'ObjectController' is either already used in your application or reserved/, content)
   ensure
     Object.send :remove_const, :ObjectController
@@ -28,13 +28,11 @@ class ControllerGeneratorTest < Rails::Generators::TestCase
   def test_invokes_helper
     run_generator
     assert_file "app/helpers/account_helper.rb"
-    assert_file "test/unit/helpers/account_helper_test.rb"
   end
 
   def test_does_not_invoke_helper_if_required
     run_generator ["account", "--skip-helper"]
     assert_no_file "app/helpers/account_helper.rb"
-    assert_no_file "test/unit/helpers/account_helper_test.rb"
   end
 
   def test_invokes_assets
@@ -43,14 +41,20 @@ class ControllerGeneratorTest < Rails::Generators::TestCase
     assert_file "app/assets/stylesheets/account.css"
   end
 
+  def test_does_not_invoke_assets_if_required
+    run_generator ["account", "--skip-assets"]
+    assert_no_file "app/assets/javascripts/account.js"
+    assert_no_file "app/assets/stylesheets/account.css"
+  end
+
   def test_invokes_default_test_framework
     run_generator
-    assert_file "test/functional/account_controller_test.rb"
+    assert_file "test/controllers/account_controller_test.rb"
   end
 
   def test_does_not_invoke_test_framework_if_required
     run_generator ["account", "--no-test-framework"]
-    assert_no_file "test/functional/account_controller_test.rb"
+    assert_no_file "test/controllers/account_controller_test.rb"
   end
 
   def test_invokes_default_template_engine
@@ -61,7 +65,14 @@ class ControllerGeneratorTest < Rails::Generators::TestCase
 
   def test_add_routes
     run_generator
-    assert_file "config/routes.rb", /get "account\/foo"/, /get "account\/bar"/
+    assert_file "config/routes.rb", /^  get 'account\/foo'/, /^  get 'account\/bar'/
+  end
+
+  def test_skip_routes
+    run_generator ["account", "foo", "--skip-routes"]
+    assert_file "config/routes.rb" do |routes|
+      assert_no_match(/get 'account\/foo'/, routes)
+    end
   end
 
   def test_invokes_default_template_engine_even_with_no_action
@@ -80,6 +91,13 @@ class ControllerGeneratorTest < Rails::Generators::TestCase
     assert_file "app/controllers/account_controller.rb" do |controller|
       assert_instance_method :foo, controller
       assert_instance_method :bar, controller
+    end
+  end
+
+  def test_namespaced_routes_are_created_in_routes
+    run_generator ["admin/dashboard", "index"]
+    assert_file "config/routes.rb" do |route|
+      assert_match(/^  namespace :admin do\n    get 'dashboard\/index'\n  end$/, route)
     end
   end
 end

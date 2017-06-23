@@ -1,4 +1,4 @@
-require 'active_support/core_ext/hash/deep_merge'
+require "active_support/core_ext/hash/deep_merge"
 
 module ActiveSupport
   class OptionMerger #:nodoc:
@@ -12,7 +12,7 @@ module ActiveSupport
 
     private
       def method_missing(method, *arguments, &block)
-        if arguments.last.is_a?(Proc)
+        if arguments.first.is_a?(Proc)
           proc = arguments.pop
           arguments << lambda { |*args| @options.deep_merge(proc.call(*args)) }
         else

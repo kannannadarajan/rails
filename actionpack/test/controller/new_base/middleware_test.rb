@@ -1,4 +1,4 @@
-require 'abstract_unit'
+require "abstract_unit"
 
 module MiddlewareTest
   class MyMiddleware
@@ -25,14 +25,14 @@ module MiddlewareTest
       result
     end
   end
-  
+
   class BlockMiddleware
     attr_accessor :configurable_message
     def initialize(app, &block)
       @app = app
       yield(self) if block_given?
     end
-    
+
     def call(env)
       result = @app.call(env)
       result[1]["Configurable-Message"] = configurable_message
@@ -56,8 +56,8 @@ module MiddlewareTest
   end
 
   class ActionsController < ActionController::Metal
-    use MyMiddleware, :only => :show
-    middleware.insert_before MyMiddleware, ExclaimerMiddleware, :except => :index
+    use MyMiddleware, only: :show
+    middleware.insert_before MyMiddleware, ExclaimerMiddleware, except: :index
 
     def index
       self.response_body = "index"
@@ -75,7 +75,7 @@ module MiddlewareTest
 
     test "middleware that is 'use'd is called as part of the Rack application" do
       result = @app.call(env_for("/"))
-      assert_equal "Hello World", RackTestUtils.body_to_string(result[2])
+      assert_equal ["Hello World"], [].tap { |a| result[2].each { |x| a << x } }
       assert_equal "Success", result[1]["Middleware-Test"]
     end
 

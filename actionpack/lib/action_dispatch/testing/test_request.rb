@@ -1,74 +1,69 @@
-require 'active_support/core_ext/object/blank'
-require 'active_support/core_ext/hash/indifferent_access'
-require 'active_support/core_ext/hash/reverse_merge'
-require 'rack/utils'
+require "active_support/core_ext/hash/indifferent_access"
+require "rack/utils"
 
 module ActionDispatch
   class TestRequest < Request
-    DEFAULT_ENV = Rack::MockRequest.env_for('/')
+    DEFAULT_ENV = Rack::MockRequest.env_for("/",
+      "HTTP_HOST"                => "test.host",
+      "REMOTE_ADDR"              => "0.0.0.0",
+      "HTTP_USER_AGENT"          => "Rails Testing",
+    )
 
-    def self.new(env = {})
-      super
+    # Create a new test request with default `env` values
+    def self.create(env = {})
+      env = Rails.application.env_config.merge(env) if defined?(Rails.application) && Rails.application
+      env["rack.request.cookie_hash"] ||= {}.with_indifferent_access
+      new(default_env.merge(env))
     end
 
-    def initialize(env = {})
-      env = Rails.application.env_config.merge(env) if defined?(Rails.application)
-      super(DEFAULT_ENV.merge(env))
-
-      self.host        = 'test.host'
-      self.remote_addr = '0.0.0.0'
-      self.user_agent  = 'Rails Testing'
+    def self.default_env
+      DEFAULT_ENV
     end
+    private_class_method :default_env
 
     def request_method=(method)
-      @env['REQUEST_METHOD'] = method.to_s.upcase
+      super(method.to_s.upcase)
     end
 
     def host=(host)
-      @env['HTTP_HOST'] = host
+      set_header("HTTP_HOST", host)
     end
 
     def port=(number)
-      @env['SERVER_PORT'] = number.to_i
+      set_header("SERVER_PORT", number.to_i)
     end
 
     def request_uri=(uri)
-      @env['REQUEST_URI'] = uri
+      set_header("REQUEST_URI", uri)
     end
 
     def path=(path)
-      @env['PATH_INFO'] = path
+      set_header("PATH_INFO", path)
     end
 
     def action=(action_name)
-      path_parameters["action"] = action_name.to_s
+      path_parameters[:action] = action_name.to_s
     end
 
     def if_modified_since=(last_modified)
-      @env['HTTP_IF_MODIFIED_SINCE'] = last_modified
+      set_header("HTTP_IF_MODIFIED_SINCE", last_modified)
     end
 
     def if_none_match=(etag)
-      @env['HTTP_IF_NONE_MATCH'] = etag
+      set_header("HTTP_IF_NONE_MATCH", etag)
     end
 
     def remote_addr=(addr)
-      @env['REMOTE_ADDR'] = addr
+      set_header("REMOTE_ADDR", addr)
     end
 
     def user_agent=(user_agent)
-      @env['HTTP_USER_AGENT'] = user_agent
+      set_header("HTTP_USER_AGENT", user_agent)
     end
 
     def accept=(mime_types)
-      @env.delete('action_dispatch.request.accepts')
-      @env['HTTP_ACCEPT'] = Array(mime_types).collect { |mime_type| mime_type.to_s }.join(",")
-    end
-
-    alias :rack_cookies :cookies
-
-    def cookies
-      @cookies ||= {}.with_indifferent_access
+      delete_header("action_dispatch.request.accepts")
+      set_header("HTTP_ACCEPT", Array(mime_types).collect(&:to_s).join(","))
     end
   end
 end

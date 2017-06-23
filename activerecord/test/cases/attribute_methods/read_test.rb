@@ -1,34 +1,23 @@
 require "cases/helper"
-require 'active_support/core_ext/object/inclusion'
-require 'thread'
 
 module ActiveRecord
   module AttributeMethods
     class ReadTest < ActiveRecord::TestCase
-      class FakeColumn < Struct.new(:name)
-        def type_cast_code(var)
-          var
-        end
-
+      FakeColumn = Struct.new(:name) do
         def type; :integer; end
       end
 
       def setup
         @klass = Class.new do
           def self.superclass; Base; end
-          def self.active_record_super; Base; end
           def self.base_class; self; end
+          def self.decorate_matching_attribute_types(*); end
+          def self.initialize_generated_modules; end
 
+          include ActiveRecord::DefineCallbacks
           include ActiveRecord::AttributeMethods
 
-          def self.define_attribute_methods
-            # Created in the inherited/included hook for "proper" ARs
-            @attribute_methods_mutex ||= Mutex.new
-
-            super
-          end
-
-          def self.column_names
+          def self.attribute_names
             %w{ one two three }
           end
 
@@ -36,11 +25,11 @@ module ActiveRecord
           end
 
           def self.columns
-            column_names.map { FakeColumn.new(name) }
+            attribute_names.map { FakeColumn.new(name) }
           end
 
           def self.columns_hash
-            Hash[column_names.map { |name|
+            Hash[attribute_names.map { |name|
               [name, FakeColumn.new(name)]
             }]
           end
@@ -50,21 +39,21 @@ module ActiveRecord
       def test_define_attribute_methods
         instance = @klass.new
 
-        @klass.column_names.each do |name|
-          assert !name.in?(instance.methods.map(&:to_s))
+        @klass.attribute_names.each do |name|
+          assert_not_includes instance.methods.map(&:to_s), name
         end
 
         @klass.define_attribute_methods
 
-        @klass.column_names.each do |name|
-          assert name.in?(instance.methods.map(&:to_s)), "#{name} is not defined"
+        @klass.attribute_names.each do |name|
+          assert_includes instance.methods.map(&:to_s), name, "#{name} is not defined"
         end
       end
 
       def test_attribute_methods_generated?
-        assert(!@klass.attribute_methods_generated?, 'attribute_methods_generated?')
+        assert_not @klass.method_defined?(:one)
         @klass.define_attribute_methods
-        assert(@klass.attribute_methods_generated?, 'attribute_methods_generated?')
+        assert @klass.method_defined?(:one)
       end
     end
   end

@@ -1,86 +1,143 @@
-module ActiveRecord::Associations::Builder
+# This is the parent Association class which defines the variables
+# used by all associations.
+#
+# The hierarchy is defined as follows:
+#  Association
+#    - SingularAssociation
+#      - BelongsToAssociation
+#      - HasOneAssociation
+#    - CollectionAssociation
+#      - HasManyAssociation
+
+module ActiveRecord::Associations::Builder # :nodoc:
   class Association #:nodoc:
-    class_attribute :valid_options
-    self.valid_options = [:class_name, :foreign_key, :select, :conditions, :include, :extend, :readonly, :validate, :references]
-
-    # Set by subclasses
-    class_attribute :macro
-
-    attr_reader :model, :name, :options, :reflection
-
-    def self.build(model, name, options)
-      new(model, name, options).build
+    class << self
+      attr_accessor :extensions
     end
+    self.extensions = []
 
-    def initialize(model, name, options)
-      @model, @name, @options = model, name, options
-    end
+    VALID_OPTIONS = [:class_name, :anonymous_class, :foreign_key, :validate] # :nodoc:
 
-    def mixin
-      @model.generated_feature_methods
-    end
+    def self.build(model, name, scope, options, &block)
+      if model.dangerous_attribute_method?(name)
+        raise ArgumentError, "You tried to define an association named #{name} on the model #{model.name}, but " \
+                             "this will conflict with a method #{name} already defined by Active Record. " \
+                             "Please choose a different association name."
+      end
 
-    def build
-      validate_options
-      reflection = model.create_reflection(self.class.macro, name, options, model)
-      define_accessors
+      extension = define_extensions model, name, &block
+      reflection = create_reflection model, name, scope, options, extension
+      define_accessors model, reflection
+      define_callbacks model, reflection
+      define_validations model, reflection
       reflection
     end
 
-    private
+    def self.create_reflection(model, name, scope, options, extension = nil)
+      raise ArgumentError, "association names must be a Symbol" unless name.kind_of?(Symbol)
 
-      def validate_options
-        options.assert_valid_keys(self.class.valid_options)
+      if scope.is_a?(Hash)
+        options = scope
+        scope   = nil
       end
 
-      def define_accessors
-        define_readers
-        define_writers
+      validate_options(options)
+
+      scope = build_scope(scope, extension)
+
+      ActiveRecord::Reflection.create(macro, name, scope, options, model)
+    end
+
+    def self.build_scope(scope, extension)
+      new_scope = scope
+
+      if scope && scope.arity == 0
+        new_scope = proc { instance_exec(&scope) }
       end
 
-      def define_readers
-        name = self.name
-        mixin.redefine_method(name) do |*params|
-          association(name).reader(*params)
+      if extension
+        new_scope = wrap_scope new_scope, extension
+      end
+
+      new_scope
+    end
+
+    def self.wrap_scope(scope, extension)
+      scope
+    end
+
+    def self.macro
+      raise NotImplementedError
+    end
+
+    def self.valid_options(options)
+      VALID_OPTIONS + Association.extensions.flat_map(&:valid_options)
+    end
+
+    def self.validate_options(options)
+      options.assert_valid_keys(valid_options(options))
+    end
+
+    def self.define_extensions(model, name)
+    end
+
+    def self.define_callbacks(model, reflection)
+      if dependent = reflection.options[:dependent]
+        check_dependent_options(dependent)
+        add_destroy_callbacks(model, reflection)
+      end
+
+      Association.extensions.each do |extension|
+        extension.build model, reflection
+      end
+    end
+
+    # Defines the setter and getter methods for the association
+    # class Post < ActiveRecord::Base
+    #   has_many :comments
+    # end
+    #
+    # Post.first.comments and Post.first.comments= methods are defined by this method...
+    def self.define_accessors(model, reflection)
+      mixin = model.generated_association_methods
+      name = reflection.name
+      define_readers(mixin, name)
+      define_writers(mixin, name)
+    end
+
+    def self.define_readers(mixin, name)
+      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}(*args)
+          association(:#{name}).reader(*args)
         end
-      end
+      CODE
+    end
 
-      def define_writers
-        name = self.name
-        mixin.redefine_method("#{name}=") do |value|
-          association(name).writer(value)
+    def self.define_writers(mixin, name)
+      mixin.class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}=(value)
+          association(:#{name}).writer(value)
         end
-      end
+      CODE
+    end
 
-      def dependent_restrict_raises?
-        ActiveRecord::Base.dependent_restrict_raises == true
-      end
+    def self.define_validations(model, reflection)
+      # noop
+    end
 
-      def dependent_restrict_deprecation_warning
-        if dependent_restrict_raises?
-          msg = "In the next release, `:dependent => :restrict` will not raise a `DeleteRestrictionError`. "\
-                "Instead, it will add an error on the model. To fix this warning, make sure your code " \
-                "isn't relying on a `DeleteRestrictionError` and then add " \
-                "`config.active_record.dependent_restrict_raises = false` to your application config."
-          ActiveSupport::Deprecation.warn msg
-        end
-      end
+    def self.valid_dependent_options
+      raise NotImplementedError
+    end
 
-      def define_restrict_dependency_method
-        name = self.name
-        mixin.redefine_method(dependency_method_name) do
-          # has_many or has_one associations
-          if send(name).respond_to?(:exists?) ? send(name).exists? : !send(name).nil?
-            if dependent_restrict_raises?
-              raise ActiveRecord::DeleteRestrictionError.new(name)
-            else
-              key  = association(name).reflection.macro == :has_one ? "one" : "many"
-              errors.add(:base, :"restrict_dependent_destroy.#{key}",
-                         :record => self.class.human_attribute_name(name).downcase)
-              return false
-            end
-          end
-        end
+    def self.check_dependent_options(dependent)
+      unless valid_dependent_options.include? dependent
+        raise ArgumentError, "The :dependent option must be one of #{valid_dependent_options}, but is :#{dependent}"
       end
+    end
+
+    def self.add_destroy_callbacks(model, reflection)
+      name = reflection.name
+      model.before_destroy lambda { |o| o.association(name).handle_dependency }
+    end
   end
 end

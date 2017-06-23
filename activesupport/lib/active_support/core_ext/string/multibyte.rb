@@ -1,24 +1,18 @@
-# encoding: utf-8
-require 'active_support/multibyte'
+require "active_support/multibyte"
 
 class String
   # == Multibyte proxy
   #
   # +mb_chars+ is a multibyte safe proxy for string methods.
   #
-  # In Ruby 1.8 and older it creates and returns an instance of the ActiveSupport::Multibyte::Chars class which
+  # It creates and returns an instance of the ActiveSupport::Multibyte::Chars class which
   # encapsulates the original string. A Unicode safe version of all the String methods are defined on this proxy
   # class. If the proxy class doesn't respond to a certain method, it's forwarded to the encapsulated string.
   #
-  #   name = 'Claus Müller'
-  #   name.reverse # => "rell??M sualC"
-  #   name.length  # => 13
-  #
-  #   name.mb_chars.reverse.to_s # => "rellüM sualC"
-  #   name.mb_chars.length       # => 12
-  #
-  # In Ruby 1.9 and newer +mb_chars+ returns +self+ because String is (mostly) encoding aware. This means that
-  # it becomes easy to run one version of your code on multiple Ruby versions.
+  #   >> "ǉ".upcase
+  #   => "ǉ"
+  #   >> "ǉ".mb_chars.upcase.to_s
+  #   => "Ǉ"
   #
   # == Method chaining
   #
@@ -36,13 +30,16 @@ class String
   # For more information about the methods defined on the Chars proxy see ActiveSupport::Multibyte::Chars. For
   # information about how to change the default Multibyte behavior see ActiveSupport::Multibyte.
   def mb_chars
-    if ActiveSupport::Multibyte.proxy_class.consumes?(self)
-      ActiveSupport::Multibyte.proxy_class.new(self)
-    else
-      self
-    end
+    ActiveSupport::Multibyte.proxy_class.new(self)
   end
 
+  # Returns +true+ if string has utf_8 encoding.
+  #
+  #   utf_8_str = "some string".encode "UTF-8"
+  #   iso_str = "some string".encode "ISO-8859-1"
+  #
+  #   utf_8_str.is_utf8? # => true
+  #   iso_str.is_utf8?   # => false
   def is_utf8?
     case encoding
     when Encoding::UTF_8

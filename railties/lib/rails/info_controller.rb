@@ -1,15 +1,44 @@
-class Rails::InfoController < ActionController::Base
+require "rails/application_controller"
+require "action_dispatch/routing/inspector"
+
+class Rails::InfoController < Rails::ApplicationController # :nodoc:
+  prepend_view_path ActionDispatch::DebugExceptions::RESCUES_TEMPLATE_PATH
+  layout -> { request.xhr? ? false : "application" }
+
+  before_action :require_local!
+
+  def index
+    redirect_to action: :routes
+  end
+
   def properties
-    if consider_all_requests_local? || request.local?
-      render :inline => Rails::Info.to_html
+    @info = Rails::Info.to_html
+    @page_title = "Properties"
+  end
+
+  def routes
+    if path = params[:path]
+      path = URI.parser.escape path
+      normalized_path = with_leading_slash path
+      render json: {
+        exact: match_route { |it| it.match normalized_path },
+        fuzzy: match_route { |it| it.spec.to_s.match path }
+      }
     else
-      render :text => '<p>For security purposes, this information is only available to local requests.</p>', :status => :forbidden
+      @routes_inspector = ActionDispatch::Routing::RoutesInspector.new(_routes.routes)
+      @page_title = "Routes"
     end
   end
 
-  protected
+  private
 
-  def consider_all_requests_local?
-    Rails.application.config.consider_all_requests_local
-  end
+    def match_route
+      _routes.routes.select { |route|
+        yield route.path
+      }.map { |route| route.path.spec.to_s }
+    end
+
+    def with_leading_slash(path)
+      ("/" + path).squeeze("/")
+    end
 end

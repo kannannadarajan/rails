@@ -2,43 +2,50 @@
 # so fixtures aren't loaded into that environment
 abort("Abort testing: Your Rails environment is running in production mode!") if Rails.env.production?
 
-require 'minitest/autorun'
-require 'active_support/test_case'
-require 'action_controller/test_case'
-require 'action_dispatch/testing/integration'
+require "rails/test_unit/minitest_plugin"
+require "active_support/test_case"
+require "action_controller"
+require "action_controller/test_case"
+require "action_dispatch/testing/integration"
+require "rails/generators/test_case"
 
-# Enable turn if it is available
-begin
-  require 'turn'
-  MiniTest::Unit.use_natural_language_case_names = true
-rescue LoadError
-end
+require "active_support/testing/autorun"
 
 if defined?(ActiveRecord::Base)
-  class ActiveSupport::TestCase
-    include ActiveRecord::TestFixtures
-    self.fixture_path = "#{Rails.root}/test/fixtures/"
+  begin
+    ActiveRecord::Migration.maintain_test_schema!
+  rescue ActiveRecord::PendingMigrationError => e
+    puts e.to_s.strip
+    exit 1
+  end
 
-    setup do
-      ActiveRecord::IdentityMap.clear
+  module ActiveSupport
+    class TestCase
+      include ActiveRecord::TestFixtures
+      self.fixture_path = "#{Rails.root}/test/fixtures/"
+      self.file_fixture_path = fixture_path + "files"
     end
   end
 
   ActionDispatch::IntegrationTest.fixture_path = ActiveSupport::TestCase.fixture_path
 
-  def create_fixtures(*table_names, &block)
-    Fixtures.create_fixtures(ActiveSupport::TestCase.fixture_path, table_names, {}, &block)
+  def create_fixtures(*fixture_set_names, &block)
+    FixtureSet.create_fixtures(ActiveSupport::TestCase.fixture_path, fixture_set_names, {}, &block)
   end
 end
 
+# :enddoc:
+
 class ActionController::TestCase
-  setup do
+  def before_setup # :nodoc:
     @routes = Rails.application.routes
+    super
   end
 end
 
 class ActionDispatch::IntegrationTest
-  setup do
+  def before_setup # :nodoc:
     @routes = Rails.application.routes
+    super
   end
 end

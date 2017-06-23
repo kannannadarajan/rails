@@ -1,53 +1,146 @@
-class Object
-  # Invokes the method identified by the symbol +method+, passing it any arguments
-  # and/or the block specified, just like the regular Ruby <tt>Object#send</tt> does.
-  #
-  # *Unlike* that method however, a +NoMethodError+ exception will *not* be raised
-  # and +nil+ will be returned instead, if the receiving object is a +nil+ object or NilClass.
-  #
-  # If try is called without a method to call, it will yield any given block with the object.
-  #
-  # ==== Examples
-  #
-  # Without +try+
-  #   @person && @person.name
-  # or
-  #   @person ? @person.name : nil
-  #
-  # With +try+
-  #   @person.try(:name)
-  #
-  # +try+ also accepts arguments and/or a block, for the method it is trying
-  #   Person.try(:find, 1)
-  #   @people.try(:collect) {|p| p.name}
-  #
-  # Without a method argument try will yield to the block unless the receiver is nil.
-  #   @person.try { |p| "#{p.first_name} #{p.last_name}" }
-  #--
-  # +try+ behaves like +Object#send+, unless called on +NilClass+.
-  def try(*a, &b)
-    if a.empty? && block_given?
-      yield self
-    else
-      __send__(*a, &b)
+require "delegate"
+
+module ActiveSupport
+  module Tryable #:nodoc:
+    def try(*a, &b)
+      try!(*a, &b) if a.empty? || respond_to?(a.first)
+    end
+
+    def try!(*a, &b)
+      if a.empty? && block_given?
+        if b.arity == 0
+          instance_eval(&b)
+        else
+          yield self
+        end
+      else
+        public_send(*a, &b)
+      end
     end
   end
 end
 
+class Object
+  include ActiveSupport::Tryable
+
+  ##
+  # :method: try
+  #
+  # :call-seq:
+  #   try(*a, &b)
+  #
+  # Invokes the public method whose name goes as first argument just like
+  # +public_send+ does, except that if the receiver does not respond to it the
+  # call returns +nil+ rather than raising an exception.
+  #
+  # This method is defined to be able to write
+  #
+  #   @person.try(:name)
+  #
+  # instead of
+  #
+  #   @person.name if @person
+  #
+  # +try+ calls can be chained:
+  #
+  #   @person.try(:spouse).try(:name)
+  #
+  # instead of
+  #
+  #   @person.spouse.name if @person && @person.spouse
+  #
+  # +try+ will also return +nil+ if the receiver does not respond to the method:
+  #
+  #   @person.try(:non_existing_method) # => nil
+  #
+  # instead of
+  #
+  #   @person.non_existing_method if @person.respond_to?(:non_existing_method) # => nil
+  #
+  # +try+ returns +nil+ when called on +nil+ regardless of whether it responds
+  # to the method:
+  #
+  #   nil.try(:to_i) # => nil, rather than 0
+  #
+  # Arguments and blocks are forwarded to the method if invoked:
+  #
+  #   @posts.try(:each_slice, 2) do |a, b|
+  #     ...
+  #   end
+  #
+  # The number of arguments in the signature must match. If the object responds
+  # to the method the call is attempted and +ArgumentError+ is still raised
+  # in case of argument mismatch.
+  #
+  # If +try+ is called without arguments it yields the receiver to a given
+  # block unless it is +nil+:
+  #
+  #   @person.try do |p|
+  #     ...
+  #   end
+  #
+  # You can also call try with a block without accepting an argument, and the block
+  # will be instance_eval'ed instead:
+  #
+  #   @person.try { upcase.truncate(50) }
+  #
+  # Please also note that +try+ is defined on +Object+. Therefore, it won't work
+  # with instances of classes that do not have +Object+ among their ancestors,
+  # like direct subclasses of +BasicObject+.
+
+  ##
+  # :method: try!
+  #
+  # :call-seq:
+  #   try!(*a, &b)
+  #
+  # Same as #try, but raises a +NoMethodError+ exception if the receiver is
+  # not +nil+ and does not implement the tried method.
+  #
+  #   "a".try!(:upcase) # => "A"
+  #   nil.try!(:upcase) # => nil
+  #   123.try!(:upcase) # => NoMethodError: undefined method `upcase' for 123:Integer
+end
+
+class Delegator
+  include ActiveSupport::Tryable
+
+  ##
+  # :method: try
+  #
+  # :call-seq:
+  #   try(a*, &b)
+  #
+  # See Object#try
+
+  ##
+  # :method: try!
+  #
+  # :call-seq:
+  #   try!(a*, &b)
+  #
+  # See Object#try!
+end
+
 class NilClass
   # Calling +try+ on +nil+ always returns +nil+.
-  # It becomes specially helpful when navigating through associations that may return +nil+.
-  #
-  # === Examples
+  # It becomes especially helpful when navigating through associations that may return +nil+.
   #
   #   nil.try(:name) # => nil
   #
   # Without +try+
-  #   @person && !@person.children.blank? && @person.children.first.name
+  #   @person && @person.children.any? && @person.children.first.name
   #
   # With +try+
   #   @person.try(:children).try(:first).try(:name)
   def try(*args)
+    nil
+  end
+
+  # Calling +try!+ on +nil+ always returns +nil+.
+  #
+  #   nil.try!(:name) # => nil
+  def try!(*args)
     nil
   end
 end

@@ -1,21 +1,26 @@
-require 'active_support/logger'
-require_dependency 'models/college'
-require_dependency 'models/course'
+require "active_support/logger"
+require "models/college"
+require "models/course"
+require "models/professor"
+require "models/other_dog"
 
 module ARTest
   def self.connection_name
-    ENV['ARCONN'] || config['default_connection']
+    ENV["ARCONN"] || config["default_connection"]
   end
 
   def self.connection_config
-    config['connections'][connection_name]
+    config.fetch("connections").fetch(connection_name) do
+      puts "Connection #{connection_name.inspect} not found. Available connections: #{config['connections'].keys.join(', ')}"
+      exit 1
+    end
   end
 
   def self.connect
-    puts "Using #{connection_name} with Identity Map #{ActiveRecord::IdentityMap.enabled? ? 'on' : 'off'}"
-    ActiveRecord::Model.logger = ActiveSupport::Logger.new("debug.log")
-    ActiveRecord::Model.configurations = connection_config
-    ActiveRecord::Model.establish_connection 'arunit'
-    ARUnit2Model.establish_connection 'arunit2'
+    puts "Using #{connection_name}"
+    ActiveRecord::Base.logger = ActiveSupport::Logger.new("debug.log", 0, 100 * 1024 * 1024)
+    ActiveRecord::Base.configurations = connection_config
+    ActiveRecord::Base.establish_connection :arunit
+    ARUnit2Model.establish_connection :arunit2
   end
 end

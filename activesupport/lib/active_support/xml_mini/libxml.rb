@@ -1,8 +1,7 @@
-require 'libxml'
-require 'active_support/core_ext/object/blank'
-require 'stringio'
+require "libxml"
+require "active_support/core_ext/object/blank"
+require "stringio"
 
-# = XmlMini LibXML implementation
 module ActiveSupport
   module XmlMini_LibXML #:nodoc:
     extend self
@@ -12,18 +11,15 @@ module ActiveSupport
     #   XML Document string or IO to parse
     def parse(data)
       if !data.respond_to?(:read)
-        data = StringIO.new(data || '')
+        data = StringIO.new(data || "")
       end
 
-      char = data.getc
-      if char.nil?
+      if data.eof?
         {}
       else
-        data.ungetc(char)
         LibXML::XML::Parser.io(data).parse.to_hash
       end
     end
-
   end
 end
 
@@ -36,20 +32,20 @@ module LibXML #:nodoc:
     end
 
     module Node #:nodoc:
-      CONTENT_ROOT = '__content__'.freeze
+      CONTENT_ROOT = "__content__".freeze
 
-      # Convert XML document to hash
+      # Convert XML document to hash.
       #
       # hash::
       #   Hash to merge the converted element into.
-      def to_hash(hash={})
+      def to_hash(hash = {})
         node_hash = {}
 
         # Insert node hash into parent hash correctly.
         case hash[name]
-          when Array then hash[name] << node_hash
-          when Hash  then hash[name] = [hash[name], node_hash]
-          when nil   then hash[name] = node_hash
+        when Array then hash[name] << node_hash
+        when Hash  then hash[name] = [hash[name], node_hash]
+        when nil   then hash[name] = node_hash
         end
 
         # Handle child elements
@@ -57,7 +53,7 @@ module LibXML #:nodoc:
           if c.element?
             c.to_hash(node_hash)
           elsif c.text? || c.cdata?
-            node_hash[CONTENT_ROOT] ||= ''
+            node_hash[CONTENT_ROOT] ||= ""
             node_hash[CONTENT_ROOT] << c.content
           end
         end
@@ -76,5 +72,7 @@ module LibXML #:nodoc:
   end
 end
 
-LibXML::XML::Document.send(:include, LibXML::Conversions::Document)
-LibXML::XML::Node.send(:include, LibXML::Conversions::Node)
+# :enddoc:
+
+LibXML::XML::Document.include(LibXML::Conversions::Document)
+LibXML::XML::Node.include(LibXML::Conversions::Node)

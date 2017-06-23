@@ -1,29 +1,49 @@
-require 'active_record/scoping/default'
-require 'active_record/scoping/named'
-require 'active_record/base'
+require "active_record/scoping/default"
+require "active_record/scoping/named"
 
 module ActiveRecord
-  class SchemaMigration < ActiveRecord::Base
-    attr_accessible :version
-
-    def self.table_name
-      Base.table_name_prefix + 'schema_migrations' + Base.table_name_suffix
-    end
-
-    def self.create_table
-      unless connection.table_exists?(table_name)
-        connection.create_table(table_name, :id => false) do |t|
-          t.column :version, :string, :null => false
-        end
-        connection.add_index table_name, :version, :unique => true,
-          :name => "#{Base.table_name_prefix}unique_schema_migrations#{Base.table_name_suffix}"
+  # This class is used to create a table that keeps track of which migrations
+  # have been applied to a given database. When a migration is run, its schema
+  # number is inserted in to the `SchemaMigration.table_name` so it doesn't need
+  # to be executed the next time.
+  class SchemaMigration < ActiveRecord::Base # :nodoc:
+    class << self
+      def primary_key
+        "version"
       end
-    end
 
-    def self.drop_table
-      if connection.table_exists?(table_name)
-        connection.remove_index table_name, :name => "#{Base.table_name_prefix}unique_schema_migrations#{Base.table_name_suffix}"
-        connection.drop_table(table_name)
+      def table_name
+        "#{table_name_prefix}#{ActiveRecord::Base.schema_migrations_table_name}#{table_name_suffix}"
+      end
+
+      def table_exists?
+        connection.table_exists?(table_name)
+      end
+
+      def create_table
+        unless table_exists?
+          version_options = connection.internal_string_options_for_primary_key
+
+          connection.create_table(table_name, id: false) do |t|
+            t.string :version, version_options
+          end
+        end
+      end
+
+      def drop_table
+        connection.drop_table table_name, if_exists: true
+      end
+
+      def normalize_migration_number(number)
+        "%.3d" % number.to_i
+      end
+
+      def normalized_versions
+        all_versions.map { |v| normalize_migration_number v }
+      end
+
+      def all_versions
+        order(:version).pluck(:version)
       end
     end
 

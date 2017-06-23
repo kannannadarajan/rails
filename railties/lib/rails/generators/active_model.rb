@@ -11,7 +11,7 @@ module Rails
     #   ActiveRecord::Generators::ActiveModel.find(Foo, "params[:id]")
     #   # => "Foo.find(params[:id])"
     #
-    #   Datamapper::Generators::ActiveModel.find(Foo, "params[:id]")
+    #   DataMapper::Generators::ActiveModel.find(Foo, "params[:id]")
     #   # => "Foo.get(params[:id])"
     #
     # On initialization, the ActiveModel accepts the instance name that will
@@ -37,15 +37,15 @@ module Rails
 
       # GET show
       # GET edit
-      # PUT update
+      # PATCH/PUT update
       # DELETE destroy
-      def self.find(klass, params=nil)
+      def self.find(klass, params = nil)
         "#{klass}.find(#{params})"
       end
 
       # GET new
       # POST create
-      def self.build(klass, params=nil)
+      def self.build(klass, params = nil)
         if params
           "#{klass}.new(#{params})"
         else
@@ -58,13 +58,13 @@ module Rails
         "#{name}.save"
       end
 
-      # PUT update
-      def update_attributes(params=nil)
-        "#{name}.update_attributes(#{params})"
+      # PATCH/PUT update
+      def update(params = nil)
+        "#{name}.update(#{params})"
       end
 
       # POST create
-      # PUT update
+      # PATCH/PUT update
       def errors
         "#{name}.errors"
       end

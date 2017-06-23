@@ -1,13 +1,15 @@
-require 'erubis'
-require 'active_support/configurable'
-require 'active_support/descendants_tracker'
-require 'active_support/core_ext/module/anonymous'
+require "abstract_controller/error"
+require "active_support/configurable"
+require "active_support/descendants_tracker"
+require "active_support/core_ext/module/anonymous"
+require "active_support/core_ext/module/attr_internal"
 
 module AbstractController
-  class Error < StandardError; end
-  class ActionNotFound < StandardError; end
+  # Raised when a non-existing controller action is triggered.
+  class ActionNotFound < StandardError
+  end
 
-  # <tt>AbstractController::Base</tt> is a low-level API. Nobody should be
+  # AbstractController::Base is a low-level API. Nobody should be
   # using it directly, and subclasses (like ActionController::Base) are
   # expected to provide their own +render+ method, since rendering means
   # different things depending on the context.
@@ -19,7 +21,6 @@ module AbstractController
     include ActiveSupport::Configurable
     extend ActiveSupport::DescendantsTracker
 
-    undef_method :not_implemented
     class << self
       attr_reader :abstract
       alias_method :abstract?, :abstract
@@ -30,36 +31,36 @@ module AbstractController
         @abstract = true
       end
 
+      def inherited(klass) # :nodoc:
+        # Define the abstract ivar on subclasses so that we don't get
+        # uninitialized ivar warnings
+        unless klass.instance_variable_defined?(:@abstract)
+          klass.instance_variable_set(:@abstract, false)
+        end
+        super
+      end
+
       # A list of all internal methods for a controller. This finds the first
       # abstract superclass of a controller, and gets a list of all public
       # instance methods on that abstract class. Public instance methods of
       # a controller would normally be considered action methods, so methods
       # declared on abstract classes are being removed.
-      # (ActionController::Metal and ActionController::Base are defined as abstract)
+      # (<tt>ActionController::Metal</tt> and ActionController::Base are defined as abstract)
       def internal_methods
         controller = self
+
         controller = controller.superclass until controller.abstract?
         controller.public_instance_methods(true)
       end
 
-      # The list of hidden actions to an empty array. Defaults to an
-      # empty array. This can be modified by other modules or subclasses
-      # to specify particular actions as hidden.
-      #
-      # ==== Returns
-      # * <tt>array</tt> - An array of method names that should not be considered actions.
-      def hidden_actions
-        []
-      end
-
       # A list of method names that should be considered actions. This
       # includes all public instance methods on a controller, less
-      # any internal methods (see #internal_methods), adding back in
+      # any internal methods (see internal_methods), adding back in
       # any methods that are internal, but still exist on the class
-      # itself. Finally, #hidden_actions are removed.
+      # itself.
       #
       # ==== Returns
-      # * <tt>array</tt> - A list of all methods that should be considered actions.
+      # * <tt>Set</tt> - A set of all methods that should be considered actions.
       def action_methods
         @action_methods ||= begin
           # All public instance methods of this class, including ancestors
@@ -67,32 +68,34 @@ module AbstractController
             # Except for public instance methods of Base and its ancestors
             internal_methods +
             # Be sure to include shadowed public instance methods of this class
-            public_instance_methods(false)).uniq.map { |x| x.to_s } -
-            # And always exclude explicitly hidden actions
-            hidden_actions.to_a
+            public_instance_methods(false)).uniq.map(&:to_s)
 
-          # Clear out AS callback method pollution
-          methods.reject { |method| method =~ /_one_time_conditions/ }
+          methods.to_set
         end
       end
 
-      # action_methods are cached and there is sometimes need to refresh
-      # them. clear_action_methods! allows you to do that, so next time
-      # you run action_methods, they will be recalculated
+      # action_methods are cached and there is sometimes a need to refresh
+      # them. ::clear_action_methods! allows you to do that, so next time
+      # you run action_methods, they will be recalculated.
       def clear_action_methods!
         @action_methods = nil
       end
 
       # Returns the full controller name, underscored, without the ending Controller.
-      # For instance, MyApp::MyPostsController would return "my_app/my_posts" for
-      # controller_name.
+      #
+      #   class MyApp::MyPostsController < AbstractController::Base
+      #
+      #   end
+      #
+      #   MyApp::MyPostsController.controller_path # => "my_app/my_posts"
       #
       # ==== Returns
-      # * <tt>string</tt>
+      # * <tt>String</tt>
       def controller_path
-        @controller_path ||= name.sub(/Controller$/, '').underscore unless anonymous?
+        @controller_path ||= name.sub(/Controller$/, "".freeze).underscore unless anonymous?
       end
 
+      # Refresh the cached action_methods when a new action_method is added.
       def method_added(name)
         super
         clear_action_methods!
@@ -105,14 +108,14 @@ module AbstractController
     #
     # The actual method that is called is determined by calling
     # #method_for_action. If no method can handle the action, then an
-    # ActionNotFound error is raised.
+    # AbstractController::ActionNotFound error is raised.
     #
     # ==== Returns
     # * <tt>self</tt>
     def process(action, *args)
-      @_action_name = action_name = action.to_s
+      @_action_name = action.to_s
 
-      unless action_name = method_for_action(action_name)
+      unless action_name = _find_action_name(@_action_name)
         raise ActionNotFound, "The action '#{action}' could not be found for #{self.class.name}"
       end
 
@@ -121,11 +124,12 @@ module AbstractController
       process_action(action_name, *args)
     end
 
-    # Delegates to the class' #controller_path
+    # Delegates to the class' ::controller_path
     def controller_path
       self.class.controller_path
     end
 
+    # Delegates to the class' ::action_methods
     def action_methods
       self.class.action_methods
     end
@@ -135,10 +139,28 @@ module AbstractController
     #
     # Notice that <tt>action_methods.include?("foo")</tt> may return
     # false and <tt>available_action?("foo")</tt> returns true because
-    # available action consider actions that are also available
+    # this method considers actions that are also available
     # through other means, for example, implicit render ones.
+    #
+    # ==== Parameters
+    # * <tt>action_name</tt> - The name of an action to be tested
     def available_action?(action_name)
-      method_for_action(action_name).present?
+      _find_action_name(action_name)
+    end
+
+    # Tests if a response body is set. Used to determine if the
+    # +process_action+ callback needs to be terminated in
+    # +AbstractController::Callbacks+.
+    def performed?
+      response_body
+    end
+
+    # Returns true if the given controller is capable of rendering
+    # a path. A subclass of +AbstractController::Base+
+    # may return false. An Email controller for example does not
+    # support paths, only full URLs.
+    def self.supports_path?
+      true
     end
 
     private
@@ -148,9 +170,6 @@ module AbstractController
       #
       # ==== Parameters
       # * <tt>name</tt> - The name of an action to be tested
-      #
-      # ==== Returns
-      # * <tt>TrueClass</tt>, <tt>FalseClass</tt>
       #
       # :api: private
       def action_method?(name)
@@ -182,6 +201,24 @@ module AbstractController
       end
 
       # Takes an action name and returns the name of the method that will
+      # handle the action.
+      #
+      # It checks if the action name is valid and returns false otherwise.
+      #
+      # See method_for_action for more information.
+      #
+      # ==== Parameters
+      # * <tt>action_name</tt> - An action name to find a method name for
+      #
+      # ==== Returns
+      # * <tt>string</tt> - The name of the method that handles the action
+      # * false           - No valid method name could be found.
+      # Raise +AbstractController::ActionNotFound+.
+      def _find_action_name(action_name)
+        _valid_action_name?(action_name) && method_for_action(action_name)
+      end
+
+      # Takes an action name and returns the name of the method that will
       # handle the action. In normal cases, this method returns the same
       # name as it receives. By default, if #method_for_action receives
       # a name that is not an action, it will look for an #action_missing
@@ -192,22 +229,29 @@ module AbstractController
       # with a template matching the action name is considered to exist.
       #
       # If you override this method to handle additional cases, you may
-      # also provide a method (like _handle_method_missing) to handle
+      # also provide a method (like +_handle_method_missing+) to handle
       # the case.
       #
-      # If none of these conditions are true, and method_for_action
-      # returns nil, an ActionNotFound exception will be raised.
+      # If none of these conditions are true, and +method_for_action+
+      # returns +nil+, an +AbstractController::ActionNotFound+ exception will be raised.
       #
       # ==== Parameters
       # * <tt>action_name</tt> - An action name to find a method name for
       #
       # ==== Returns
       # * <tt>string</tt> - The name of the method that handles the action
-      # * <tt>nil</tt>    - No method name could be found. Raise ActionNotFound.
+      # * <tt>nil</tt>    - No method name could be found.
       def method_for_action(action_name)
-        if action_method?(action_name) then action_name
-        elsif respond_to?(:action_missing, true) then "_handle_action_missing"
+        if action_method?(action_name)
+          action_name
+        elsif respond_to?(:action_missing, true)
+          "_handle_action_missing"
         end
+      end
+
+      # Checks if the action name is valid and returns false otherwise.
+      def _valid_action_name?(action_name)
+        !action_name.to_s.include? File::SEPARATOR
       end
   end
 end

@@ -11,7 +11,12 @@ module ActiveRecord
 
         def replace_keys(record)
           super
-          owner[reflection.foreign_type] = record && record.class.base_class.name
+          owner[reflection.foreign_type] = record.class.base_class.name
+        end
+
+        def remove_keys
+          super
+          owner[reflection.foreign_type] = nil
         end
 
         def different_target?(record)
@@ -22,12 +27,13 @@ module ActiveRecord
           reflection.polymorphic_inverse_of(record.class)
         end
 
-        def raise_on_type_mismatch(record)
+        def raise_on_type_mismatch!(record)
           # A polymorphic association cannot have a type mismatch, by definition
         end
 
         def stale_state
-          [super, owner[reflection.foreign_type].to_s]
+          foreign_key = super
+          foreign_key && [foreign_key.to_s, owner[reflection.foreign_type].to_s]
         end
     end
   end

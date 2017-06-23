@@ -1,4 +1,4 @@
-require 'abstract_unit'
+require "abstract_unit"
 
 # This is testing the decoupling of view renderer and view context
 # by allowing the controller to be used as view context. This is
@@ -14,27 +14,25 @@ module RenderContext
     include ActionView::Context
 
     # 2) Call _prepare_context that will do the required initialization
-    before_filter :_prepare_context
+    before_action :_prepare_context
 
     def hello_world
       @value = "Hello"
-      render :action => "hello_world", :layout => false
+      render action: "hello_world", layout: false
     end
 
     def with_layout
       @value = "Hello"
-      render :action => "hello_world", :layout => "basic"
+      render action: "hello_world", layout: "basic"
     end
 
-    protected
+    protected def __controller_method__
+      "controller context!"
+    end
 
     # 3) Set view_context to self
-    def view_context
+    private def view_context
       self
-    end
-
-    def __controller_method__
-      "controller context!"
     end
   end
 

@@ -2,34 +2,33 @@ module ActiveRecord
   module Associations
     class Preloader
       class Association #:nodoc:
-        attr_reader :owners, :reflection, :preload_options, :model, :klass
+        attr_reader :owners, :reflection, :preload_scope, :model, :klass
+        attr_reader :preloaded_records
 
-        def initialize(klass, owners, reflection, preload_options)
-          @klass           = klass
-          @owners          = owners
-          @reflection      = reflection
-          @preload_options = preload_options || {}
-          @model           = owners.first && owners.first.class
-          @scoped          = nil
-          @owners_by_key   = nil
+        def initialize(klass, owners, reflection, preload_scope)
+          @klass         = klass
+          @owners        = owners
+          @reflection    = reflection
+          @preload_scope = preload_scope
+          @model         = owners.first && owners.first.class
+          @scope         = nil
+          @preloaded_records = []
         end
 
-        def run
-          unless owners.first.association(reflection.name).loaded?
-            preload
-          end
+        def run(preloader)
+          preload(preloader)
         end
 
-        def preload
+        def preload(preloader)
           raise NotImplementedError
         end
 
-        def scoped
-          @scoped ||= build_scope
+        def scope
+          @scope ||= build_scope
         end
 
         def records_for(ids)
-          scoped.where(association_key.in(ids))
+          scope.where(association_key_name => ids)
         end
 
         def table
@@ -44,21 +43,12 @@ module ActiveRecord
         # This is overridden by HABTM as the condition should be on the foreign_key column in
         # the join table
         def association_key
-          table[association_key_name]
+          klass.arel_attribute(association_key_name, table)
         end
 
         # The name of the key on the model which declares the association
         def owner_key_name
           raise NotImplementedError
-        end
-
-        # We're converting to a string here because postgres will return the aliased association
-        # key in a habtm as a string (for whatever reason)
-        def owners_by_key
-          @owners_by_key ||= owners.group_by do |owner|
-            key = owner[owner_key_name]
-            key && key.to_s
-          end
         end
 
         def options
@@ -67,58 +57,113 @@ module ActiveRecord
 
         private
 
-        def associated_records_by_owner
-          owners_map = owners_by_key
-          owner_keys = owners_map.keys.compact
+          def associated_records_by_owner(preloader)
+            records = load_records do |record|
+              owner = owners_by_key[convert_key(record[association_key_name])]
+              association = owner.association(reflection.name)
+              association.set_inverse_instance(record)
+            end
 
-          if klass.nil? || owner_keys.empty?
-            records = []
-          else
-            # Some databases impose a limit on the number of ids in a list (in Oracle it's 1000)
-            # Make several smaller queries if necessary or make one query if the adapter supports it
-            sliced  = owner_keys.each_slice(model.connection.in_clause_length || owner_keys.size)
-            records = sliced.map { |slice| records_for(slice) }.flatten
-          end
-
-          # Each record may have multiple owners, and vice-versa
-          records_by_owner = Hash[owners.map { |owner| [owner, []] }]
-          records.each do |record|
-            owner_key = record[association_key_name].to_s
-
-            owners_map[owner_key].each do |owner|
-              records_by_owner[owner] << record
+            owners.each_with_object({}) do |owner, result|
+              result[owner] = records[convert_key(owner[owner_key_name])] || []
             end
           end
-          records_by_owner
-        end
 
-        def build_scope
-          scope = klass.scoped
-
-          scope = scope.where(interpolate(options[:conditions]))
-          scope = scope.where(interpolate(preload_options[:conditions]))
-
-          scope = scope.select(preload_options[:select] || options[:select] || table[Arel.star])
-          scope = scope.includes(preload_options[:include] || options[:include])
-
-          if options[:as]
-            scope = scope.where(
-              klass.table_name => {
-                reflection.type => model.base_class.sti_name
-              }
-            )
+          def owner_keys
+            unless defined?(@owner_keys)
+              @owner_keys = owners.map do |owner|
+                owner[owner_key_name]
+              end
+              @owner_keys.uniq!
+              @owner_keys.compact!
+            end
+            @owner_keys
           end
 
-          scope
-        end
-
-        def interpolate(conditions)
-          if conditions.respond_to?(:to_proc)
-            klass.send(:instance_eval, &conditions)
-          else
-            conditions
+          def owners_by_key
+            unless defined?(@owners_by_key)
+              @owners_by_key = owners.each_with_object({}) do |owner, h|
+                h[convert_key(owner[owner_key_name])] = owner
+              end
+            end
+            @owners_by_key
           end
-        end
+
+          def key_conversion_required?
+            @key_conversion_required ||= association_key_type != owner_key_type
+          end
+
+          def convert_key(key)
+            if key_conversion_required?
+              key.to_s
+            else
+              key
+            end
+          end
+
+          def association_key_type
+            @klass.type_for_attribute(association_key_name.to_s).type
+          end
+
+          def owner_key_type
+            @model.type_for_attribute(owner_key_name.to_s).type
+          end
+
+          def load_records(&block)
+            return {} if owner_keys.empty?
+            # Some databases impose a limit on the number of ids in a list (in Oracle it's 1000)
+            # Make several smaller queries if necessary or make one query if the adapter supports it
+            slices = owner_keys.each_slice(klass.connection.in_clause_length || owner_keys.size)
+            @preloaded_records = slices.flat_map do |slice|
+              records_for(slice).load(&block)
+            end
+            @preloaded_records.group_by do |record|
+              convert_key(record[association_key_name])
+            end
+          end
+
+          def reflection_scope
+            @reflection_scope ||= reflection.scope_for(klass)
+          end
+
+          def build_scope
+            scope = klass.unscoped
+
+            values = reflection_scope.values
+            preload_values = preload_scope.values
+
+            scope.where_clause = reflection_scope.where_clause + preload_scope.where_clause
+            scope.references_values = Array(values[:references]) + Array(preload_values[:references])
+
+            if preload_values[:select] || values[:select]
+              scope._select!(preload_values[:select] || values[:select])
+            end
+            scope.includes! preload_values[:includes] || values[:includes]
+            if preload_scope.joins_values.any?
+              scope.joins!(preload_scope.joins_values)
+            else
+              scope.joins!(reflection_scope.joins_values)
+            end
+
+            if order_values = preload_values[:order] || values[:order]
+              scope.order!(order_values)
+            end
+
+            if preload_values[:reordering] || values[:reordering]
+              scope.reordering_value = true
+            end
+
+            if preload_values[:readonly] || values[:readonly]
+              scope.readonly!
+            end
+
+            if options[:as]
+              scope.where!(klass.table_name => { reflection.type => model.base_class.sti_name })
+            end
+
+            scope.unscope_values = Array(values[:unscope]) + Array(preload_values[:unscope])
+            klass.default_scoped.merge(scope)
+          end
       end
     end
   end

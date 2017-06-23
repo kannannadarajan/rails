@@ -1,7 +1,9 @@
-require 'time'
-require 'base64'
-require 'active_support/core_ext/module/delegation'
-require 'active_support/core_ext/string/inflections'
+require "time"
+require "base64"
+require "bigdecimal"
+require "active_support/core_ext/module/delegation"
+require "active_support/core_ext/string/inflections"
+require "active_support/core_ext/date_time/calculations"
 
 module ActiveSupport
   # = XmlMini
@@ -18,11 +20,11 @@ module ActiveSupport
       attr_writer :original_filename, :content_type
 
       def original_filename
-        @original_filename || 'untitled'
+        @original_filename || "untitled"
       end
 
       def content_type
-        @content_type || 'application/octet-stream'
+        @content_type || "application/octet-stream"
       end
     end
 
@@ -30,25 +32,30 @@ module ActiveSupport
       "binary" => "base64"
     } unless defined?(DEFAULT_ENCODINGS)
 
-    TYPE_NAMES = {
-      "Symbol"     => "symbol",
-      "Fixnum"     => "integer",
-      "Bignum"     => "integer",
-      "BigDecimal" => "decimal",
-      "Float"      => "float",
-      "TrueClass"  => "boolean",
-      "FalseClass" => "boolean",
-      "Date"       => "date",
-      "DateTime"   => "datetime",
-      "Time"       => "datetime",
-      "Array"      => "array",
-      "Hash"       => "hash"
-    } unless defined?(TYPE_NAMES)
+    unless defined?(TYPE_NAMES)
+      TYPE_NAMES = {
+        "Symbol"     => "symbol",
+        "Integer"    => "integer",
+        "BigDecimal" => "decimal",
+        "Float"      => "float",
+        "TrueClass"  => "boolean",
+        "FalseClass" => "boolean",
+        "Date"       => "date",
+        "DateTime"   => "dateTime",
+        "Time"       => "dateTime",
+        "Array"      => "array",
+        "Hash"       => "hash"
+      }
+
+      # No need to map these on Ruby 2.4+
+      TYPE_NAMES["Fixnum"] = "integer" unless 0.class == Integer
+      TYPE_NAMES["Bignum"] = "integer" unless 0.class == Integer
+    end
 
     FORMATTING = {
       "symbol"   => Proc.new { |symbol| symbol.to_s },
       "date"     => Proc.new { |date| date.to_s(:db) },
-      "datetime" => Proc.new { |time| time.xmlschema },
+      "dateTime" => Proc.new { |time| time.xmlschema },
       "binary"   => Proc.new { |binary| ::Base64.encode64(binary) },
       "yaml"     => Proc.new { |yaml| yaml.to_yaml }
     } unless defined?(FORMATTING)
@@ -56,13 +63,23 @@ module ActiveSupport
     # TODO use regexp instead of Date.parse
     unless defined?(PARSING)
       PARSING = {
-        "symbol"       => Proc.new { |symbol|  symbol.to_sym },
+        "symbol"       => Proc.new { |symbol|  symbol.to_s.to_sym },
         "date"         => Proc.new { |date|    ::Date.parse(date) },
         "datetime"     => Proc.new { |time|    Time.xmlschema(time).utc rescue ::DateTime.parse(time).utc },
         "integer"      => Proc.new { |integer| integer.to_i },
         "float"        => Proc.new { |float|   float.to_f },
-        "decimal"      => Proc.new { |number|  BigDecimal(number) },
-        "boolean"      => Proc.new { |boolean| %w(1 true).include?(boolean.strip) },
+        "decimal"      => Proc.new do |number|
+          if String === number
+            begin
+              BigDecimal(number)
+            rescue ArgumentError
+              BigDecimal("0")
+            end
+          else
+            BigDecimal(number)
+          end
+        end,
+        "boolean"      => Proc.new { |boolean| %w(1 true).include?(boolean.to_s.strip) },
         "string"       => Proc.new { |string|  string.to_s },
         "yaml"         => Proc.new { |yaml|    YAML::load(yaml) rescue yaml },
         "base64Binary" => Proc.new { |bin|     ::Base64.decode64(bin) },
@@ -76,28 +93,32 @@ module ActiveSupport
       )
     end
 
-    attr_reader :backend
-    delegate :parse, :to => :backend
+    attr_accessor :depth
+    self.depth = 100
+
+    delegate :parse, to: :backend
+
+    def backend
+      current_thread_backend || @backend
+    end
 
     def backend=(name)
-      if name.is_a?(Module)
-        @backend = name
-      else
-        require "active_support/xml_mini/#{name.to_s.downcase}"
-        @backend = ActiveSupport.const_get("XmlMini_#{name}")
-      end
+      backend = name && cast_backend_name_to_module(name)
+      self.current_thread_backend = backend if current_thread_backend
+      @backend = backend
     end
 
     def with_backend(name)
-      old_backend, self.backend = backend, name
+      old_backend = current_thread_backend
+      self.current_thread_backend = name && cast_backend_name_to_module(name)
       yield
     ensure
-      self.backend = old_backend
+      self.current_thread_backend = old_backend
     end
 
     def to_tag(key, value, options)
       type_name = options.delete(:type)
-      merged_options = options.merge(:root => key, :skip_instruct => true)
+      merged_options = options.merge(root: key, skip_instruct: true)
 
       if value.is_a?(::Method) || value.is_a?(::Proc)
         if value.arity == 1
@@ -111,10 +132,11 @@ module ActiveSupport
         type_name ||= TYPE_NAMES[value.class.name]
         type_name ||= value.class.name if value && !value.respond_to?(:to_str)
         type_name   = type_name.to_s   if type_name
+        type_name   = "dateTime" if type_name == "datetime"
 
         key = rename_key(key.to_s, options)
 
-        attributes = options[:skip_types] || type_name.nil? ? { } : { :type => type_name }
+        attributes = options[:skip_types] || type_name.nil? ? {} : { type: type_name }
         attributes[:nil] = true if value.nil?
 
         encoding = options[:encoding] || DEFAULT_ENCODINGS[type_name]
@@ -137,32 +159,49 @@ module ActiveSupport
       key
     end
 
-    protected
+    private
 
-    def _dasherize(key)
-      # $2 must be a non-greedy regex for this to work
-      left, middle, right = /\A(_*)(.*?)(_*)\Z/.match(key.strip)[1,3]
-      "#{left}#{middle.tr('_ ', '--')}#{right}"
-    end
-
-	  # TODO: Add support for other encodings
-    def _parse_binary(bin, entity) #:nodoc:
-      case entity['encoding']
-      when 'base64'
-        ::Base64.decode64(bin)
-      else
-        bin
+      def _dasherize(key)
+        # $2 must be a non-greedy regex for this to work
+        left, middle, right = /\A(_*)(.*?)(_*)\Z/.match(key.strip)[1, 3]
+        "#{left}#{middle.tr('_ ', '--')}#{right}"
       end
-    end
 
-    def _parse_file(file, entity)
-      f = StringIO.new(::Base64.decode64(file))
-      f.extend(FileLike)
-      f.original_filename = entity['name']
-      f.content_type = entity['content_type']
-      f
-    end
+      # TODO: Add support for other encodings
+      def _parse_binary(bin, entity)
+        case entity["encoding"]
+        when "base64"
+          ::Base64.decode64(bin)
+        else
+          bin
+        end
+      end
+
+      def _parse_file(file, entity)
+        f = StringIO.new(::Base64.decode64(file))
+        f.extend(FileLike)
+        f.original_filename = entity["name"]
+        f.content_type = entity["content_type"]
+        f
+      end
+
+      def current_thread_backend
+        Thread.current[:xml_mini_backend]
+      end
+
+      def current_thread_backend=(name)
+        Thread.current[:xml_mini_backend] = name && cast_backend_name_to_module(name)
+      end
+
+      def cast_backend_name_to_module(name)
+        if name.is_a?(Module)
+          name
+        else
+          require "active_support/xml_mini/#{name.downcase}"
+          ActiveSupport.const_get("XmlMini_#{name}")
+        end
+      end
   end
 
-  XmlMini.backend = 'REXML'
+  XmlMini.backend = "REXML"
 end

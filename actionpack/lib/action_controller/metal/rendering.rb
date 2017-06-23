@@ -1,12 +1,32 @@
+require "active_support/core_ext/string/filters"
+
 module ActionController
   module Rendering
     extend ActiveSupport::Concern
 
-    include AbstractController::Rendering
+    RENDER_FORMATS_IN_PRIORITY = [:body, :plain, :html]
+
+    module ClassMethods
+      # Documentation at ActionController::Renderer#render
+      delegate :render, to: :renderer
+
+      # Returns a renderer instance (inherited from ActionController::Renderer)
+      # for the controller.
+      attr_reader :renderer
+
+      def setup_renderer! # :nodoc:
+        @renderer = Renderer.for(self)
+      end
+
+      def inherited(klass)
+        klass.setup_renderer!
+        super
+      end
+    end
 
     # Before processing, set the request formats in current controller formats.
     def process_action(*) #:nodoc:
-      self.formats = request.formats.map { |x| x.ref }
+      self.formats = request.formats.map(&:ref).compact
       super
     end
 
@@ -14,60 +34,89 @@ module ActionController
     def render(*args) #:nodoc:
       raise ::AbstractController::DoubleRenderError if response_body
       super
-      self.content_type ||= Mime[formats.first].to_s
-      response_body
     end
 
-    # Overwrite render_to_string because body can now be set to a rack body.
+    # Overwrite render_to_string because body can now be set to a Rack body.
     def render_to_string(*)
-      if self.response_body = super
+      result = super
+      if result.respond_to?(:each)
         string = ""
-        response_body.each { |r| string << r }
+        result.each { |r| string << r }
         string
+      else
+        result
       end
-    ensure
-      self.response_body = nil
     end
 
-    def render_to_body(*)
-      super || " "
+    def render_to_body(options = {})
+      super || _render_in_priorities(options) || " "
     end
 
     private
 
-    # Normalize arguments by catching blocks and setting them on :update.
-    def _normalize_args(action=nil, options={}, &blk) #:nodoc:
-      options = super
-      options[:update] = blk if block_given?
-      options
-    end
-
-    # Normalize both text and status options.
-    def _normalize_options(options) #:nodoc:
-      if options.key?(:text) && options[:text].respond_to?(:to_text)
-        options[:text] = options[:text].to_text
+      def _process_variant(options)
+        if defined?(request) && !request.nil? && request.variant.present?
+          options[:variant] = request.variant
+        end
       end
 
-      if options.delete(:nothing) || (options.key?(:text) && options[:text].nil?)
-        options[:text] = " "
+      def _render_in_priorities(options)
+        RENDER_FORMATS_IN_PRIORITY.each do |format|
+          return options[format] if options.key?(format)
+        end
+
+        nil
       end
 
-      if options[:status]
-        options[:status] = Rack::Utils.status_code(options[:status])
+      def _set_html_content_type
+        self.content_type = Mime[:html].to_s
       end
 
-      super
-    end
+      def _set_rendered_content_type(format)
+        if format && !response.content_type
+          self.content_type = format.to_s
+        end
+      end
 
-    # Process controller specific options, as status, content-type and location.
-    def _process_options(options) #:nodoc:
-      status, content_type, location = options.values_at(:status, :content_type, :location)
+      # Normalize arguments by catching blocks and setting them on :update.
+      def _normalize_args(action = nil, options = {}, &blk)
+        options = super
+        options[:update] = blk if block_given?
+        options
+      end
 
-      self.status = status if status
-      self.content_type = content_type if content_type
-      self.headers["Location"] = url_for(location) if location
+      # Normalize both text and status options.
+      def _normalize_options(options)
+        _normalize_text(options)
 
-      super
-    end
+        if options[:html]
+          options[:html] = ERB::Util.html_escape(options[:html])
+        end
+
+        if options[:status]
+          options[:status] = Rack::Utils.status_code(options[:status])
+        end
+
+        super
+      end
+
+      def _normalize_text(options)
+        RENDER_FORMATS_IN_PRIORITY.each do |format|
+          if options.key?(format) && options[format].respond_to?(:to_text)
+            options[format] = options[format].to_text
+          end
+        end
+      end
+
+      # Process controller specific options, as status, content-type and location.
+      def _process_options(options)
+        status, content_type, location = options.values_at(:status, :content_type, :location)
+
+        self.status = status if status
+        self.content_type = content_type if content_type
+        headers["Location"] = url_for(location) if location
+
+        super
+      end
   end
 end
